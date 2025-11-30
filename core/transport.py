@@ -45,9 +45,12 @@ class MessageType(Enum):
     BALANCE_CLAIM = auto()  # Заявление о балансе при handshake
     BALANCE_ACK = auto()    # Подтверждение баланса
     
-    # Агенты
-    CONTRACT = auto()       # Код контракта
-    CONTRACT_RESULT = auto() # Результат выполнения
+    # Агенты/Услуги (Layer 3: Market)
+    CONTRACT = auto()           # Код контракта
+    CONTRACT_RESULT = auto()    # Результат выполнения
+    SERVICE_REQUEST = auto()    # Запрос услуги
+    SERVICE_RESPONSE = auto()   # Ответ на запрос услуги
+    SERVICE_LIST = auto()       # Список доступных услуг
 
 
 @dataclass

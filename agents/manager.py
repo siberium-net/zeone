@@ -1,33 +1,36 @@
 """
-Agent Manager - Система исполнения контрактов в песочнице
-=========================================================
+Agent Manager - Система услуг и рынок (Layer 3)
+===============================================
 
-[SECURITY] Этот модуль позволяет выполнять код от других узлов
-в изолированной среде (sandbox) с использованием RestrictedPython:
+[MARKET] Каждый "Агент" - это услуга, которую узел продает сети:
+- storage: хранение данных
+- compute: вычисления
+- vpn: проксирование трафика
+- echo: тестовый сервис (Ping-Pong с оплатой)
 
-- Нет доступа к файловой системе
-- Нет сетевых операций  
-- Ограниченный набор встроенных функций
+[ECONOMY] Интеграция с Ledger:
+- Проверка бюджета/лимита доверия перед выполнением
+- Автоматическая запись стоимости в Ledger после выполнения
+- Блокировка должников
+
+[SECURITY] Контракты выполняются в песочнице RestrictedPython:
+- Ограниченный набор функций
 - Лимит времени выполнения
-
-[DECENTRALIZATION] Контракты позволяют узлам договариваться
-о выполнении задач без доверия к центральному серверу.
-Код верифицируется криптографически перед выполнением.
+- Изолированное пространство имен
 """
 
 import asyncio
 import time
 import hashlib
 import logging
+import json
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List, Callable, Set
+from typing import Optional, Dict, Any, List, Callable, Set, Tuple, TYPE_CHECKING
 from pathlib import Path
-import signal
-import threading
 
-from RestrictedPython import compile_restricted, safe_globals
+from RestrictedPython import compile_restricted
 from RestrictedPython.Guards import (
-    safe_builtins,
     guarded_iter_unpack_sequence,
     guarded_unpack_sequence,
 )
@@ -35,8 +38,613 @@ from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getit
 
 from config import config
 
+if TYPE_CHECKING:
+    from economy.ledger import Ledger
+
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Agent System - Система услуг
+# =============================================================================
+
+@dataclass
+class ServiceRequest:
+    """
+    Запрос на услугу.
+    
+    [MARKET] Содержит:
+    - service_name: название услуги ("echo", "storage", etc.)
+    - payload: данные для обработки
+    - requester_id: ID узла-заказчика
+    - budget: максимальный бюджет на выполнение
+    """
+    
+    service_name: str
+    payload: Any
+    requester_id: str
+    budget: float  # Максимальный бюджет в единицах
+    request_id: str = ""
+    timestamp: float = field(default_factory=time.time)
+    
+    def __post_init__(self):
+        if not self.request_id:
+            # Генерируем уникальный ID запроса
+            data = f"{self.service_name}:{self.requester_id}:{self.timestamp}"
+            self.request_id = hashlib.sha256(data.encode()).hexdigest()[:16]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "service_name": self.service_name,
+            "payload": self.payload,
+            "requester_id": self.requester_id,
+            "budget": self.budget,
+            "request_id": self.request_id,
+            "timestamp": self.timestamp,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ServiceRequest":
+        return cls(
+            service_name=data["service_name"],
+            payload=data["payload"],
+            requester_id=data["requester_id"],
+            budget=data["budget"],
+            request_id=data.get("request_id", ""),
+            timestamp=data.get("timestamp", time.time()),
+        )
+
+
+@dataclass
+class ServiceResponse:
+    """
+    Ответ на запрос услуги.
+    
+    [MARKET] Содержит:
+    - success: успешно ли выполнение
+    - result: результат выполнения
+    - cost: фактическая стоимость
+    - execution_time: время выполнения
+    """
+    
+    success: bool
+    result: Any
+    cost: float  # Фактическая стоимость в единицах
+    execution_time: float
+    request_id: str
+    error: Optional[str] = None
+    provider_id: str = ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "success": self.success,
+            "result": self.result,
+            "cost": self.cost,
+            "execution_time": self.execution_time,
+            "request_id": self.request_id,
+            "error": self.error,
+            "provider_id": self.provider_id,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ServiceResponse":
+        return cls(
+            success=data["success"],
+            result=data["result"],
+            cost=data["cost"],
+            execution_time=data["execution_time"],
+            request_id=data["request_id"],
+            error=data.get("error"),
+            provider_id=data.get("provider_id", ""),
+        )
+
+
+class BaseAgent(ABC):
+    """
+    Абстрактный базовый класс для агентов (услуг).
+    
+    [MARKET] Каждый агент реализует:
+    - service_name: уникальное название услуги
+    - price_per_unit: цена за единицу работы
+    - execute(): метод выполнения задачи
+    
+    [ECONOMY] Стоимость вычисляется как:
+    cost = price_per_unit * units_of_work
+    """
+    
+    @property
+    @abstractmethod
+    def service_name(self) -> str:
+        """Уникальное название услуги."""
+        pass
+    
+    @property
+    @abstractmethod
+    def price_per_unit(self) -> float:
+        """Цена за единицу работы."""
+        pass
+    
+    @property
+    def description(self) -> str:
+        """Описание услуги."""
+        return f"Service: {self.service_name}"
+    
+    @abstractmethod
+    async def execute(self, payload: Any) -> Tuple[Any, float]:
+        """
+        Выполнить задачу.
+        
+        Args:
+            payload: Данные для обработки
+        
+        Returns:
+            (result, units_of_work) - результат и количество единиц работы
+        """
+        pass
+    
+    def calculate_cost(self, units: float) -> float:
+        """Рассчитать стоимость."""
+        return self.price_per_unit * units
+    
+    def estimate_cost(self, payload: Any) -> float:
+        """
+        Оценить стоимость выполнения (до выполнения).
+        
+        По умолчанию оценивает по размеру payload.
+        Может быть переопределен для более точной оценки.
+        """
+        if isinstance(payload, (str, bytes)):
+            size = len(payload)
+        elif isinstance(payload, dict):
+            size = len(json.dumps(payload))
+        else:
+            size = 100  # Default estimate
+        
+        # Оценка в единицах работы
+        estimated_units = size / 10  # 10 байт = 1 единица (по умолчанию)
+        return self.calculate_cost(estimated_units)
+
+
+class EchoAgent(BaseAgent):
+    """
+    Тестовый агент Echo - Ping-Pong с оплатой.
+    
+    [MARKET] Услуга "echo":
+    - Просто возвращает полученные данные
+    - Цена: 1 единица за 10 байт
+    - Используется для отладки биллинга
+    
+    [EXAMPLE]
+    Узел А посылает "Hello" (5 байт) Узлу Б.
+    Узел Б возвращает "Hello", стоимость = 0.5 единиц.
+    В базе Узла Б: "Узел А должен мне 0.5 единиц".
+    """
+    
+    BYTES_PER_UNIT = 10  # 10 байт = 1 единица
+    
+    @property
+    def service_name(self) -> str:
+        return "echo"
+    
+    @property
+    def price_per_unit(self) -> float:
+        return 1.0  # 1 единица стоит 1 "кредит"
+    
+    @property
+    def description(self) -> str:
+        return f"Echo service: returns input data. Price: {self.price_per_unit} per {self.BYTES_PER_UNIT} bytes"
+    
+    async def execute(self, payload: Any) -> Tuple[Any, float]:
+        """
+        Выполнить Echo - просто вернуть данные.
+        
+        Returns:
+            (payload, units) - те же данные и количество единиц работы
+        """
+        # Вычисляем размер payload
+        if isinstance(payload, bytes):
+            size = len(payload)
+        elif isinstance(payload, str):
+            size = len(payload.encode("utf-8"))
+        else:
+            # Сериализуем для определения размера
+            size = len(json.dumps(payload).encode("utf-8"))
+        
+        # Вычисляем единицы работы
+        units = size / self.BYTES_PER_UNIT
+        
+        # Минимум 0.1 единицы даже для пустого payload
+        units = max(0.1, units)
+        
+        logger.debug(f"[ECHO] Processing {size} bytes, units={units:.2f}")
+        
+        return payload, units
+
+
+class StorageAgent(BaseAgent):
+    """
+    Агент хранения данных (заглушка для демонстрации).
+    
+    [MARKET] Услуга "storage":
+    - Хранение данных на узле
+    - Цена: 0.1 единицы за 1KB в час
+    """
+    
+    @property
+    def service_name(self) -> str:
+        return "storage"
+    
+    @property
+    def price_per_unit(self) -> float:
+        return 0.1  # 0.1 за KB-час
+    
+    @property
+    def description(self) -> str:
+        return "Storage service: store data on this node. Price: 0.1 per KB-hour"
+    
+    async def execute(self, payload: Any) -> Tuple[Any, float]:
+        """
+        [STUB] Сохранить данные (заглушка).
+        
+        В реальной реализации здесь будет:
+        - Сохранение в локальное хранилище
+        - Генерация storage_id
+        - Запуск таймера для биллинга
+        """
+        data = payload.get("data", b"")
+        duration_hours = payload.get("duration_hours", 1)
+        
+        if isinstance(data, str):
+            size_kb = len(data.encode("utf-8")) / 1024
+        elif isinstance(data, bytes):
+            size_kb = len(data) / 1024
+        else:
+            size_kb = len(json.dumps(data)) / 1024
+        
+        units = size_kb * duration_hours
+        storage_id = hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
+        
+        return {
+            "storage_id": storage_id,
+            "size_kb": size_kb,
+            "duration_hours": duration_hours,
+            "status": "stored",
+        }, units
+
+
+class ComputeAgent(BaseAgent):
+    """
+    Агент вычислений (заглушка для демонстрации).
+    
+    [MARKET] Услуга "compute":
+    - Выполнение вычислительных задач
+    - Цена: 1 единица за секунду CPU
+    """
+    
+    @property
+    def service_name(self) -> str:
+        return "compute"
+    
+    @property
+    def price_per_unit(self) -> float:
+        return 1.0  # 1 за CPU-секунду
+    
+    @property
+    def description(self) -> str:
+        return "Compute service: execute computational tasks. Price: 1 per CPU-second"
+    
+    async def execute(self, payload: Any) -> Tuple[Any, float]:
+        """
+        [STUB] Выполнить вычисление (заглушка).
+        
+        В реальной реализации здесь будет:
+        - Выполнение в sandbox
+        - Измерение CPU времени
+        - Возврат результата
+        """
+        task = payload.get("task", "none")
+        
+        start = time.time()
+        
+        # Простая демо-задача
+        if task == "sum":
+            numbers = payload.get("numbers", [])
+            result = sum(numbers)
+        elif task == "count":
+            data = payload.get("data", "")
+            result = len(data)
+        else:
+            result = f"Unknown task: {task}"
+        
+        cpu_seconds = time.time() - start
+        # Минимум 0.01 секунды
+        cpu_seconds = max(0.01, cpu_seconds)
+        
+        return {
+            "task": task,
+            "result": result,
+            "cpu_seconds": cpu_seconds,
+        }, cpu_seconds
+
+
+# =============================================================================
+# Agent Manager - Менеджер услуг
+# =============================================================================
+
+class AgentManager:
+    """
+    Менеджер агентов/услуг.
+    
+    [MARKET] Функции:
+    - Реестр доступных услуг на этом узле
+    - Обработка запросов от других узлов
+    - Интеграция с Ledger для биллинга
+    
+    [ECONOMY] Процесс обработки запроса:
+    1. Проверить, есть ли такой агент
+    2. Проверить бюджет/лимит доверия заказчика
+    3. Выполнить agent.execute()
+    4. Записать стоимость в Ledger
+    5. Вернуть результат
+    """
+    
+    def __init__(
+        self,
+        ledger: Optional["Ledger"] = None,
+        node_id: str = "",
+    ):
+        """
+        Инициализация менеджера агентов.
+        
+        Args:
+            ledger: Экземпляр Ledger для биллинга
+            node_id: ID этого узла (провайдера услуг)
+        """
+        self.ledger = ledger
+        self.node_id = node_id
+        
+        # Реестр агентов: service_name -> Agent
+        self._agents: Dict[str, BaseAgent] = {}
+        
+        # Статистика
+        self._total_requests = 0
+        self._total_revenue = 0.0
+        
+        # Регистрируем встроенных агентов
+        self._register_builtin_agents()
+    
+    def _register_builtin_agents(self) -> None:
+        """Зарегистрировать встроенных агентов."""
+        self.register_agent(EchoAgent())
+        self.register_agent(StorageAgent())
+        self.register_agent(ComputeAgent())
+    
+    def register_agent(self, agent: BaseAgent) -> None:
+        """
+        Зарегистрировать агента в реестре.
+        
+        [MARKET] После регистрации услуга становится доступной
+        для запросов от других узлов.
+        """
+        self._agents[agent.service_name] = agent
+        logger.info(f"[AGENT] Registered: {agent.service_name} ({agent.description})")
+    
+    def unregister_agent(self, service_name: str) -> bool:
+        """Удалить агента из реестра."""
+        if service_name in self._agents:
+            del self._agents[service_name]
+            logger.info(f"[AGENT] Unregistered: {service_name}")
+            return True
+        return False
+    
+    def get_agent(self, service_name: str) -> Optional[BaseAgent]:
+        """Получить агента по имени услуги."""
+        return self._agents.get(service_name)
+    
+    def list_services(self) -> List[Dict[str, Any]]:
+        """
+        Получить список доступных услуг.
+        
+        [MARKET] Этот список можно отправлять другим узлам
+        для рекламы услуг.
+        """
+        services = []
+        for name, agent in self._agents.items():
+            services.append({
+                "service_name": name,
+                "price_per_unit": agent.price_per_unit,
+                "description": agent.description,
+            })
+        return services
+    
+    def set_ledger(self, ledger: "Ledger") -> None:
+        """Установить Ledger для биллинга."""
+        self.ledger = ledger
+    
+    def set_node_id(self, node_id: str) -> None:
+        """Установить ID узла."""
+        self.node_id = node_id
+    
+    async def handle_request(
+        self,
+        request: ServiceRequest,
+    ) -> ServiceResponse:
+        """
+        Обработать запрос на услугу.
+        
+        [MARKET] Процесс:
+        1. Проверить наличие агента
+        2. Проверить бюджет заказчика
+        3. Выполнить услугу
+        4. Записать долг в Ledger
+        5. Вернуть результат
+        
+        Args:
+            request: Запрос на услугу
+        
+        Returns:
+            ServiceResponse с результатом
+        """
+        start_time = time.time()
+        self._total_requests += 1
+        
+        logger.info(
+            f"[AGENT] Request from {request.requester_id[:8]}...: "
+            f"service={request.service_name}, budget={request.budget}"
+        )
+        
+        # 1. Проверяем наличие агента
+        agent = self.get_agent(request.service_name)
+        if agent is None:
+            return ServiceResponse(
+                success=False,
+                result=None,
+                cost=0,
+                execution_time=time.time() - start_time,
+                request_id=request.request_id,
+                error=f"Service not found: {request.service_name}",
+                provider_id=self.node_id,
+            )
+        
+        # 2. Оцениваем стоимость
+        estimated_cost = agent.estimate_cost(request.payload)
+        
+        if estimated_cost > request.budget:
+            return ServiceResponse(
+                success=False,
+                result=None,
+                cost=0,
+                execution_time=time.time() - start_time,
+                request_id=request.request_id,
+                error=f"Insufficient budget: estimated {estimated_cost:.2f}, budget {request.budget:.2f}",
+                provider_id=self.node_id,
+            )
+        
+        # 3. Проверяем лимит доверия в Ledger (если есть)
+        if self.ledger:
+            can_process, reason = await self._check_requester_credit(request.requester_id)
+            if not can_process:
+                return ServiceResponse(
+                    success=False,
+                    result=None,
+                    cost=0,
+                    execution_time=time.time() - start_time,
+                    request_id=request.request_id,
+                    error=f"Credit check failed: {reason}",
+                    provider_id=self.node_id,
+                )
+        
+        # 4. Выполняем услугу
+        try:
+            result, units = await agent.execute(request.payload)
+            actual_cost = agent.calculate_cost(units)
+            
+            # Проверяем, что фактическая стоимость не превышает бюджет
+            if actual_cost > request.budget:
+                actual_cost = request.budget
+                logger.warning(
+                    f"[AGENT] Cost capped to budget: {actual_cost:.2f} "
+                    f"(was {agent.calculate_cost(units):.2f})"
+                )
+            
+        except Exception as e:
+            logger.error(f"[AGENT] Execution error: {e}")
+            return ServiceResponse(
+                success=False,
+                result=None,
+                cost=0,
+                execution_time=time.time() - start_time,
+                request_id=request.request_id,
+                error=f"Execution error: {str(e)}",
+                provider_id=self.node_id,
+            )
+        
+        # 5. Записываем долг в Ledger
+        if self.ledger and actual_cost > 0:
+            await self._record_service_debt(request.requester_id, actual_cost)
+        
+        self._total_revenue += actual_cost
+        
+        execution_time = time.time() - start_time
+        
+        logger.info(
+            f"[AGENT] Completed: service={request.service_name}, "
+            f"cost={actual_cost:.2f}, time={execution_time:.3f}s"
+        )
+        
+        return ServiceResponse(
+            success=True,
+            result=result,
+            cost=actual_cost,
+            execution_time=execution_time,
+            request_id=request.request_id,
+            provider_id=self.node_id,
+        )
+    
+    async def _check_requester_credit(self, requester_id: str) -> Tuple[bool, str]:
+        """
+        Проверить кредитоспособность заказчика.
+        
+        [ECONOMY] Проверяем:
+        - Не заблокирован ли заказчик из-за долга
+        - Есть ли у него лимит доверия
+        """
+        if not self.ledger:
+            return (True, "No ledger")
+        
+        # Проверяем, не заблокирован ли заказчик
+        # (отрицательный баланс = заказчик должен нам)
+        balance = await self.ledger.get_balance(requester_id)
+        
+        # Баланс с точки зрения ledger:
+        # положительный = они должны нам
+        # отрицательный = мы должны им
+        # Для услуг: если они уже много должны - можем отказать
+        
+        debt_limit = self.ledger.debt_limit
+        
+        if balance > debt_limit:
+            return (
+                False,
+                f"Requester debt {balance:.0f} exceeds limit {debt_limit:.0f}"
+            )
+        
+        return (True, "OK")
+    
+    async def _record_service_debt(self, requester_id: str, cost: float) -> None:
+        """
+        Записать долг за услугу в Ledger.
+        
+        [ECONOMY] Записываем claim - заказчик теперь должен нам cost единиц.
+        """
+        if not self.ledger:
+            return
+        
+        # record_claim увеличивает наш баланс (заказчик должен нам больше)
+        new_balance = await self.ledger.record_claim(
+            peer_id=requester_id,
+            amount=cost,
+            signature="",  # Подпись добавится на уровне протокола
+        )
+        
+        logger.debug(
+            f"[AGENT] Recorded debt: {requester_id[:8]}... owes {cost:.2f}, "
+            f"total balance: {new_balance:.2f}"
+        )
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Получить статистику менеджера."""
+        return {
+            "registered_services": len(self._agents),
+            "services": list(self._agents.keys()),
+            "total_requests": self._total_requests,
+            "total_revenue": self._total_revenue,
+        }
+
+
+# =============================================================================
+# Contract/Sandbox System (сохранено для обратной совместимости)
+# =============================================================================
 
 @dataclass
 class Contract:
@@ -87,15 +695,7 @@ class Contract:
 
 @dataclass
 class ContractResult:
-    """
-    Результат выполнения контракта.
-    
-    [SECURITY] Результат содержит:
-    - success: успешно ли выполнение
-    - output: результат или сообщение об ошибке
-    - execution_time: время выполнения
-    - contract_hash: хеш выполненного контракта
-    """
+    """Результат выполнения контракта."""
     
     success: bool
     output: Any
@@ -113,300 +713,94 @@ class ContractResult:
         }
 
 
-class TimeoutError(Exception):
-    """Исключение при превышении лимита времени."""
-    pass
-
-
 class SandboxViolation(Exception):
     """Исключение при попытке нарушить ограничения песочницы."""
     pass
 
 
-class RestrictedPrinter:
+class ContractExecutor:
     """
-    Безопасная функция print для песочницы.
+    Исполнитель контрактов в песочнице.
     
-    Собирает вывод в буфер вместо stdout.
-    """
-    
-    def __init__(self, max_size: int = 65536):
-        self.buffer: List[str] = []
-        self.max_size = max_size
-        self.current_size = 0
-    
-    def __call__(self, *args, **kwargs) -> None:
-        text = " ".join(str(a) for a in args)
-        if self.current_size + len(text) > self.max_size:
-            raise SandboxViolation("Output size limit exceeded")
-        self.buffer.append(text)
-        self.current_size += len(text)
-    
-    def get_output(self) -> str:
-        return "\n".join(self.buffer)
-
-
-class SafeRange:
-    """
-    Безопасная версия range с ограничением.
-    
-    [SECURITY] Предотвращает DoS через огромные range.
+    [SECURITY] Использует RestrictedPython для изоляции.
     """
     
-    MAX_SIZE = 1_000_000
-    
-    def __call__(self, *args) -> range:
-        r = range(*args)
-        if len(r) > self.MAX_SIZE:
-            raise SandboxViolation(f"Range too large: {len(r)} > {self.MAX_SIZE}")
-        return r
-
-
-class AgentManager:
-    """
-    Менеджер агентов/контрактов.
-    
-    [DECENTRALIZATION] AgentManager позволяет:
-    - Загружать контракты от других узлов
-    - Выполнять их в изолированной среде
-    - Кэшировать проверенные контракты
-    
-    [SECURITY] Все контракты выполняются в RestrictedPython:
-    - Белый список встроенных функций
-    - Нет доступа к __builtins__ напрямую
-    - Нет import/exec/eval
-    - Контроль итераций и размеров данных
-    """
-    
-    # Белый список безопасных встроенных функций
     SAFE_BUILTINS = {
-        # Типы данных
-        "True": True,
-        "False": False,
-        "None": None,
-        "int": int,
-        "float": float,
-        "str": str,
-        "bool": bool,
-        "list": list,
-        "dict": dict,
-        "tuple": tuple,
-        "set": set,
-        "frozenset": frozenset,
-        "bytes": bytes,
-        
-        # Математика
-        "abs": abs,
-        "min": min,
-        "max": max,
-        "sum": sum,
-        "round": round,
-        "pow": pow,
-        "divmod": divmod,
-        
-        # Итерация
-        "len": len,
-        "enumerate": enumerate,
-        "zip": zip,
-        "map": map,
-        "filter": filter,
-        "sorted": sorted,
-        "reversed": reversed,
-        "all": all,
-        "any": any,
-        
-        # Строки
-        "chr": chr,
-        "ord": ord,
-        "repr": repr,
-        "ascii": ascii,
-        "format": format,
-        
-        # Прочее
-        "isinstance": isinstance,
-        "issubclass": issubclass,
-        "callable": callable,
-        "hash": hash,
-        "id": id,
-        "type": type,
+        "True": True, "False": False, "None": None,
+        "int": int, "float": float, "str": str, "bool": bool,
+        "list": list, "dict": dict, "tuple": tuple, "set": set,
+        "bytes": bytes, "frozenset": frozenset,
+        "abs": abs, "min": min, "max": max, "sum": sum,
+        "round": round, "pow": pow, "divmod": divmod,
+        "len": len, "enumerate": enumerate, "zip": zip,
+        "map": map, "filter": filter, "sorted": sorted,
+        "reversed": reversed, "all": all, "any": any,
+        "chr": chr, "ord": ord, "repr": repr, "format": format,
+        "isinstance": isinstance, "callable": callable,
+        "hash": hash, "type": type,
     }
     
-    def __init__(
-        self,
-        max_execution_time: float = 5.0,
-        max_code_size: int = 65536,
-        contracts_dir: Optional[str] = None,
-    ):
-        """
-        Инициализация менеджера агентов.
-        
-        Args:
-            max_execution_time: Максимальное время выполнения (секунды)
-            max_code_size: Максимальный размер кода (байты)
-            contracts_dir: Директория для хранения контрактов
-        """
+    def __init__(self, max_execution_time: float = 5.0):
         self.max_execution_time = max_execution_time
-        self.max_code_size = max_code_size
-        self.contracts_dir = Path(contracts_dir or config.agent.contracts_dir)
-        
-        # Кэш скомпилированных контрактов
-        self._compiled_cache: Dict[str, Any] = {}
-        
-        # Белый список авторов контрактов
-        self._trusted_authors: Set[str] = set()
-        
-        # Создаем директорию если нет
-        self.contracts_dir.mkdir(parents=True, exist_ok=True)
-    
-    def add_trusted_author(self, author_id: str) -> None:
-        """Добавить автора в белый список."""
-        self._trusted_authors.add(author_id)
-    
-    def remove_trusted_author(self, author_id: str) -> None:
-        """Удалить автора из белого списка."""
-        self._trusted_authors.discard(author_id)
-    
-    def is_trusted_author(self, author_id: str) -> bool:
-        """Проверить, доверяем ли автору."""
-        return author_id in self._trusted_authors
-    
-    def _create_restricted_globals(self) -> Dict[str, Any]:
-        """
-        Создать безопасное глобальное пространство имен.
-        
-        [SECURITY] Это ключевая функция безопасности:
-        - Только белый список функций
-        - Защищенный доступ к атрибутам
-        - Защищенная итерация
-        """
-        printer = RestrictedPrinter()
-        
-        restricted_globals = {
-            "__builtins__": self.SAFE_BUILTINS.copy(),
-            "_print_": printer,
-            "_getattr_": default_guarded_getattr,
-            "_getitem_": default_guarded_getitem,
-            "_getiter_": iter,
-            "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
-            "_unpack_sequence_": guarded_unpack_sequence,
-            "_write_": lambda x: x,  # Позволяем запись в контейнеры
-            
-            # Безопасный range
-            "range": SafeRange(),
-            
-            # Специальные функции для вывода
-            "print": printer,
-            
-            # Результат контракта
-            "_result_": None,
-        }
-        
-        return restricted_globals, printer
-    
-    def compile_contract(self, contract: Contract) -> Any:
-        """
-        Скомпилировать контракт.
-        
-        [SECURITY] Компиляция через RestrictedPython:
-        - Проверяет синтаксис
-        - Применяет ограничения
-        - Отклоняет опасные конструкции
-        
-        Returns:
-            Скомпилированный код
-        
-        Raises:
-            SandboxViolation: Если код нарушает ограничения
-        """
-        # Проверяем размер
-        if len(contract.code) > self.max_code_size:
-            raise SandboxViolation(
-                f"Code size {len(contract.code)} exceeds limit {self.max_code_size}"
-            )
-        
-        # Проверяем кэш
-        if contract.hash in self._compiled_cache:
-            return self._compiled_cache[contract.hash]
-        
-        # Компилируем через RestrictedPython
-        result = compile_restricted(
-            contract.code,
-            filename=f"<contract:{contract.hash[:8]}>",
-            mode="exec",
-        )
-        
-        # Проверяем ошибки компиляции
-        if result.errors:
-            errors = "\n".join(result.errors)
-            raise SandboxViolation(f"Compilation errors:\n{errors}")
-        
-        # Кэшируем
-        self._compiled_cache[contract.hash] = result.code
-        
-        return result.code
     
     async def execute(
         self,
         contract: Contract,
         inputs: Optional[Dict[str, Any]] = None,
-        verify_signature: bool = True,
     ) -> ContractResult:
-        """
-        Выполнить контракт в песочнице.
-        
-        [SECURITY] Выполнение изолировано:
-        - Ограничение по времени
-        - Ограниченные функции
-        - Изолированное пространство имен
-        
-        Args:
-            contract: Контракт для выполнения
-            inputs: Входные данные для контракта
-            verify_signature: Проверять ли подпись автора
-        
-        Returns:
-            ContractResult с результатом выполнения
-        """
+        """Выполнить контракт в песочнице."""
         start_time = time.time()
         
         try:
-            # Компилируем контракт
-            compiled = self.compile_contract(contract)
-            
-            # Создаем изолированное пространство имен
-            restricted_globals, printer = self._create_restricted_globals()
-            
-            # Добавляем входные данные
-            if inputs:
-                for key, value in inputs.items():
-                    # Проверяем, что ключ безопасен
-                    if key.startswith("_"):
-                        raise SandboxViolation(f"Input key cannot start with _: {key}")
-                    restricted_globals[key] = value
-            
-            # Выполняем в отдельном потоке с таймаутом
-            result = await self._execute_with_timeout(
-                compiled,
-                restricted_globals,
+            # Компиляция
+            result = compile_restricted(
+                contract.code,
+                filename=f"<contract:{contract.hash[:8]}>",
+                mode="exec",
             )
             
-            execution_time = time.time() - start_time
+            if result.errors:
+                return ContractResult(
+                    success=False,
+                    output=None,
+                    execution_time=time.time() - start_time,
+                    contract_hash=contract.hash,
+                    error=f"Compilation errors: {result.errors}",
+                )
             
-            # Собираем результат
-            output = restricted_globals.get("_result_", result)
-            printed_output = printer.get_output()
+            # Создаем globals
+            restricted_globals = {
+                "__builtins__": self.SAFE_BUILTINS.copy(),
+                "_getattr_": default_guarded_getattr,
+                "_getitem_": default_guarded_getitem,
+                "_getiter_": iter,
+                "_result_": None,
+            }
             
-            if printed_output and output is None:
-                output = printed_output
+            if inputs:
+                restricted_globals.update(inputs)
+            
+            # Выполнение
+            loop = asyncio.get_event_loop()
+            
+            def run():
+                locals_dict: Dict[str, Any] = {}
+                exec(result.code, restricted_globals, locals_dict)
+                return restricted_globals.get("_result_", locals_dict.get("result"))
+            
+            output = await asyncio.wait_for(
+                loop.run_in_executor(None, run),
+                timeout=self.max_execution_time,
+            )
             
             return ContractResult(
                 success=True,
                 output=output,
-                execution_time=execution_time,
+                execution_time=time.time() - start_time,
                 contract_hash=contract.hash,
             )
             
-        except TimeoutError:
+        except asyncio.TimeoutError:
             return ContractResult(
                 success=False,
                 output=None,
@@ -414,141 +808,11 @@ class AgentManager:
                 contract_hash=contract.hash,
                 error="Execution timeout",
             )
-            
-        except SandboxViolation as e:
-            return ContractResult(
-                success=False,
-                output=None,
-                execution_time=time.time() - start_time,
-                contract_hash=contract.hash,
-                error=f"Sandbox violation: {e}",
-            )
-            
         except Exception as e:
             return ContractResult(
                 success=False,
                 output=None,
                 execution_time=time.time() - start_time,
                 contract_hash=contract.hash,
-                error=f"Execution error: {type(e).__name__}: {e}",
+                error=str(e),
             )
-    
-    async def _execute_with_timeout(
-        self,
-        compiled_code: Any,
-        restricted_globals: Dict[str, Any],
-    ) -> Any:
-        """
-        Выполнить код с ограничением по времени.
-        
-        [SECURITY] Использует asyncio для неблокирующего таймаута.
-        """
-        loop = asyncio.get_event_loop()
-        
-        def run_code():
-            # Локальное пространство имен
-            restricted_locals: Dict[str, Any] = {}
-            exec(compiled_code, restricted_globals, restricted_locals)
-            return restricted_locals.get("result", None)
-        
-        try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, run_code),
-                timeout=self.max_execution_time,
-            )
-            return result
-        except asyncio.TimeoutError:
-            raise TimeoutError("Contract execution exceeded time limit")
-    
-    def save_contract(self, contract: Contract) -> str:
-        """
-        Сохранить контракт в файл.
-        
-        Returns:
-            Путь к файлу
-        """
-        import json
-        
-        filepath = self.contracts_dir / f"{contract.hash}.json"
-        with open(filepath, "w") as f:
-            json.dump(contract.to_dict(), f, indent=2)
-        
-        return str(filepath)
-    
-    def load_contract(self, contract_hash: str) -> Optional[Contract]:
-        """
-        Загрузить контракт из файла.
-        
-        Returns:
-            Contract или None если не найден
-        """
-        import json
-        
-        filepath = self.contracts_dir / f"{contract_hash}.json"
-        if not filepath.exists():
-            return None
-        
-        with open(filepath, "r") as f:
-            data = json.load(f)
-        
-        return Contract.from_dict(data)
-    
-    def list_contracts(self) -> List[str]:
-        """Получить список хешей сохраненных контрактов."""
-        contracts = []
-        for filepath in self.contracts_dir.glob("*.json"):
-            contracts.append(filepath.stem)
-        return contracts
-
-
-# Примеры безопасных контрактов
-EXAMPLE_CONTRACTS = {
-    "calculator": """
-# Простой калькулятор
-# Входные данные: a, b, operation
-
-if operation == "add":
-    _result_ = a + b
-elif operation == "sub":
-    _result_ = a - b
-elif operation == "mul":
-    _result_ = a * b
-elif operation == "div":
-    _result_ = a / b if b != 0 else "Division by zero"
-else:
-    _result_ = "Unknown operation"
-""",
-    
-    "data_processor": """
-# Обработчик данных
-# Входные данные: data (list)
-
-if not isinstance(data, list):
-    _result_ = "Error: data must be a list"
-else:
-    total = sum(data) if data else 0
-    average = total / len(data) if data else 0
-    _result_ = {
-        "count": len(data),
-        "sum": total,
-        "average": average,
-        "min": min(data) if data else None,
-        "max": max(data) if data else None,
-    }
-""",
-    
-    "hash_verifier": """
-# Проверка хеша
-# Входные данные: text, expected_hash
-
-import hashlib  # Это будет заблокировано RestrictedPython!
-
-# Безопасная альтернатива - используем встроенный hash
-computed = hash(text)
-_result_ = {
-    "computed_hash": computed,
-    "matches": str(computed) == expected_hash,
-}
-""",
-}
-

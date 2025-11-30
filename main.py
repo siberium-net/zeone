@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-P2P Network Node - Точка входа (Layer 2: Economy)
-=================================================
+P2P Network Node - Точка входа (Layer 3: Market)
+================================================
 
 [DECENTRALIZATION] Этот скрипт запускает полностью децентрализованный узел:
 - Генерирует или загружает криптографическую идентичность
@@ -14,6 +14,11 @@ P2P Network Node - Точка входа (Layer 2: Economy)
 - Блокировка leechers при превышении лимита долга
 - Обмен балансом при handshake
 
+[MARKET] Layer 3 - Рынок услуг:
+- Регистрация услуг (агентов) на узле
+- Обработка SERVICE_REQUEST от других узлов
+- Биллинг через Ledger
+
 Использование:
     python main.py [--port PORT] [--bootstrap HOST:PORT] [--identity FILE]
 
@@ -23,6 +28,9 @@ P2P Network Node - Точка входа (Layer 2: Economy)
     
     # Подключение к существующему узлу
     python main.py --port 8469 --bootstrap 127.0.0.1:8468
+    
+    # Тест Echo сервиса
+    >>> echo Hello World
 """
 
 import argparse
@@ -37,7 +45,7 @@ from config import config
 from core.node import Node
 from core.transport import Crypto, Message, MessageType
 from economy.ledger import Ledger, DEFAULT_DEBT_LIMIT_BYTES
-from agents.manager import AgentManager
+from agents.manager import AgentManager, ServiceRequest, ServiceResponse
 
 
 # Настройка логирования
@@ -61,13 +69,6 @@ def format_bytes(num_bytes: float) -> str:
 def load_or_create_identity(identity_file: str) -> Crypto:
     """
     Загрузить или создать криптографическую идентичность узла.
-    
-    [SECURITY] Приватный ключ - это идентичность узла.
-    Потеря ключа = потеря идентичности.
-    Компрометация ключа = возможность выдавать себя за узел.
-    
-    [DECENTRALIZATION] Каждый узел генерирует свой ключ локально.
-    Нет центра регистрации или сертификации.
     """
     path = Path(identity_file)
     
@@ -103,32 +104,24 @@ def parse_bootstrap(bootstrap_str: str) -> List[Tuple[str, int]]:
     return nodes
 
 
-async def interactive_shell(node: Node, ledger: Ledger, agent_manager: AgentManager) -> None:
+async def interactive_shell(
+    node: Node,
+    ledger: Ledger,
+    agent_manager: AgentManager
+) -> None:
     """
     Интерактивная оболочка для взаимодействия с узлом.
-    
-    Команды:
-    - peers: показать подключенных пиров
-    - ping <node_id>: отправить PING пиру
-    - broadcast <message>: отправить сообщение всем
-    - stats: показать статистику
-    - trust <node_id>: показать Trust Score
-    - balance [node_id]: показать баланс
-    - balances: показать все балансы
-    - help: показать справку
-    - quit: выйти
     """
     print("\n" + "=" * 60)
-    print("P2P Node Interactive Shell (Layer 2: Economy)")
+    print("P2P Node Interactive Shell (Layer 3: Market)")
     print(f"Node ID: {node.node_id[:32]}...")
     print(f"Listening on: {node.host}:{node.port}")
-    print(f"Debt limit: {format_bytes(ledger.debt_limit)}")
+    print(f"Services: {', '.join(agent_manager._agents.keys())}")
     print("Type 'help' for commands, 'quit' to exit")
     print("=" * 60 + "\n")
     
     while True:
         try:
-            # Используем asyncio для неблокирующего ввода
             loop = asyncio.get_event_loop()
             line = await loop.run_in_executor(None, lambda: input(">>> ").strip())
             
@@ -146,23 +139,27 @@ async def interactive_shell(node: Node, ledger: Ledger, agent_manager: AgentMana
             elif cmd == "help":
                 print("""
 Available commands:
-  peers             - List connected peers with traffic stats
-  known             - List known (not connected) peers  
-  ping <node_id>    - Send PING to peer (use first 8 chars of ID)
+  peers             - List connected peers
+  known             - List known peers  
+  ping <peer_id>    - Send PING to peer
   broadcast <msg>   - Broadcast message to all peers
   stats             - Show node statistics
-  trust <node_id>   - Show Trust Score for peer
-  balance [node_id] - Show balance with peer (or all if no arg)
+  trust <peer_id>   - Show Trust Score
+  balance [peer_id] - Show balance with peer
   balances          - Show all balances
   ledger            - Show ledger statistics
+  
+[MARKET] Service commands:
+  services          - List available services on this node
+  echo <peer_id> <text>  - Send Echo request to peer (test billing)
+  request <peer_id> <service> <data> <budget> - Send service request
+  
+Other:
   id                - Show this node's ID
   help              - Show this help
-  quit              - Exit the node
-  
-[ECONOMY] Balance interpretation:
-  Positive (+) = peer owes us (we sent more data)
-  Negative (-) = we owe peer (we received more data)
-  Blocked = peer exceeded debt limit, no more data sent to them
+  quit              - Exit
+
+[ECONOMY] Balance: + = they owe us, - = we owe them
 """)
             
             elif cmd == "id":
@@ -178,12 +175,9 @@ Available commands:
                         direction = "OUT" if peer.is_outbound else "IN"
                         blocked = "[BLOCKED]" if peer.blocked else ""
                         balance = await ledger.get_balance(peer.node_id)
-                        balance_str = f"{balance:+.0f}" if balance != 0 else "0"
                         print(
                             f"  - {peer.node_id[:12]}... @ {peer.host}:{peer.port} "
-                            f"[{direction}] sent:{format_bytes(peer.bytes_sent)} "
-                            f"recv:{format_bytes(peer.bytes_received)} "
-                            f"bal:{balance_str} {blocked}"
+                            f"[{direction}] bal:{balance:+.0f} {blocked}"
                         )
             
             elif cmd == "known":
@@ -193,14 +187,13 @@ Available commands:
                 else:
                     print(f"[INFO] Known peers ({len(known)}):")
                     for info in known.values():
-                        print(f"  - {info.node_id[:16]}... @ {info.host}:{info.port} (trust: {info.trust_score:.2f})")
+                        print(f"  - {info.node_id[:16]}... @ {info.host}:{info.port}")
             
             elif cmd == "ping":
                 if not args:
                     print("[ERROR] Usage: ping <node_id_prefix>")
                     continue
                 
-                # Ищем пира по префиксу ID
                 target_peer = None
                 for peer in node.peer_manager.get_active_peers():
                     if peer.node_id.startswith(args) or peer.node_id[:16].startswith(args):
@@ -213,16 +206,14 @@ Available commands:
                 
                 from core.protocol import PingPongHandler
                 ping = PingPongHandler.create_ping(node.crypto)
-                
-                # Используем send_with_accounting для учета
-                success, sent, reason = await target_peer.send_with_accounting(
+                success, sent, _ = await target_peer.send_with_accounting(
                     ping, ledger, node.use_masking
                 )
                 
                 if success:
                     print(f"[OK] PING sent to {target_peer.node_id[:16]}... ({sent} bytes)")
                 else:
-                    print(f"[ERROR] Failed to send PING: {reason}")
+                    print(f"[ERROR] Failed to send PING")
             
             elif cmd == "broadcast":
                 if not args:
@@ -235,7 +226,7 @@ Available commands:
                     sender_id=node.node_id,
                 )
                 count = await node.broadcast(message, with_accounting=True)
-                print(f"[OK] Broadcast sent to {count} peers (with accounting)")
+                print(f"[OK] Broadcast sent to {count} peers")
             
             elif cmd == "stats":
                 peers = node.peer_manager.get_active_peers()
@@ -246,13 +237,12 @@ Available commands:
                 blocked_count = sum(1 for p in peers if p.blocked)
                 
                 ledger_stats = await ledger.get_stats()
+                agent_stats = agent_manager.get_stats()
                 
                 print(f"""
 Node Statistics:
   Connected peers: {len(peers)} ({blocked_count} blocked)
   Known peers: {len(known)}
-  Inbound connections: {sum(1 for p in peers if not p.is_outbound)}
-  Outbound connections: {sum(1 for p in peers if p.is_outbound)}
 
 Traffic (this session):
   Total sent: {format_bytes(total_sent)}
@@ -262,7 +252,11 @@ Economy:
   Debt limit: {format_bytes(ledger.debt_limit)}
   Total owed to us: {format_bytes(ledger_stats['total_owed_to_us'])}
   Total we owe: {format_bytes(ledger_stats['total_we_owe'])}
-  Peers with balance: {ledger_stats['peers_with_balance']}
+
+Market:
+  Registered services: {agent_stats['registered_services']}
+  Total requests handled: {agent_stats['total_requests']}
+  Total revenue: {agent_stats['total_revenue']:.2f} units
 """)
             
             elif cmd == "trust":
@@ -270,7 +264,6 @@ Economy:
                     print("[ERROR] Usage: trust <node_id_prefix>")
                     continue
                 
-                # Ищем пира по префиксу
                 found = False
                 for peer in node.peer_manager.get_active_peers():
                     if peer.node_id.startswith(args) or peer.node_id[:16].startswith(args):
@@ -284,18 +277,17 @@ Economy:
             
             elif cmd == "balance":
                 if args:
-                    # Баланс с конкретным пиром
                     found = False
                     for peer in node.peer_manager.get_active_peers():
                         if peer.node_id.startswith(args) or peer.node_id[:16].startswith(args):
                             info = await ledger.get_balance_info(peer.node_id)
                             print(f"""
 Balance with {peer.node_id[:16]}...:
-  Current balance: {info['balance']:+.0f} bytes ({format_bytes(abs(info['balance']))})
+  Current balance: {info['balance']:+.0f} ({format_bytes(abs(info['balance']))})
   Total sent: {format_bytes(info['total_sent'])}
   Total received: {format_bytes(info['total_received'])}
   Status: {"BLOCKED" if peer.blocked else "OK"}
-  Interpretation: {"They owe us" if info['balance'] > 0 else "We owe them" if info['balance'] < 0 else "Even"}
+  Meaning: {"They owe us" if info['balance'] > 0 else "We owe them" if info['balance'] < 0 else "Even"}
 """)
                             found = True
                             break
@@ -303,21 +295,17 @@ Balance with {peer.node_id[:16]}...:
                     if not found:
                         print(f"[ERROR] Peer not found: {args}")
                 else:
-                    # Показать все балансы
                     balances = await ledger.get_all_balances()
                     if not balances:
                         print("[INFO] No balance records")
                     else:
                         print(f"[INFO] All balances ({len(balances)}):")
-                        for b in balances[:20]:  # Показываем топ 20
+                        for b in balances[:20]:
                             sign = "+" if b['balance'] > 0 else ""
                             status = "BLOCKED" if ledger.is_peer_blocked(b['peer_id']) else ""
                             print(
                                 f"  {b['peer_id'][:12]}... "
-                                f"bal:{sign}{b['balance']:.0f} "
-                                f"sent:{format_bytes(b['total_sent'])} "
-                                f"recv:{format_bytes(b['total_received'])} "
-                                f"{status}"
+                                f"bal:{sign}{b['balance']:.0f} {status}"
                             )
             
             elif cmd == "balances":
@@ -329,21 +317,12 @@ Balance with {peer.node_id[:16]}...:
                     total_negative = sum(b['balance'] for b in balances if b['balance'] < 0)
                     
                     print(f"""
-[INFO] Balance Summary:
+Balance Summary:
   Peers with balance: {len(balances)}
   Total owed to us: {format_bytes(total_positive)}
   Total we owe: {format_bytes(abs(total_negative))}
   Net position: {format_bytes(total_positive + total_negative)}
-  
-Top debtors (owe us):""")
-                    for b in sorted(balances, key=lambda x: x['balance'], reverse=True)[:5]:
-                        if b['balance'] > 0:
-                            print(f"    {b['peer_id'][:12]}... owes {format_bytes(b['balance'])}")
-                    
-                    print("\nTop creditors (we owe):")
-                    for b in sorted(balances, key=lambda x: x['balance'])[:5]:
-                        if b['balance'] < 0:
-                            print(f"    {b['peer_id'][:12]}... owed {format_bytes(abs(b['balance']))}")
+""")
             
             elif cmd == "ledger":
                 stats = await ledger.get_stats()
@@ -352,14 +331,94 @@ Ledger Statistics:
   Known peers: {stats['peer_count']}
   Transactions: {stats['transaction_count']}
   Active IOUs: {stats['active_ious']}
-  Outstanding IOU debt: {format_bytes(stats['total_outstanding_debt'])}
-  
-Balance Statistics:
   Total owed to us: {format_bytes(stats['total_owed_to_us'])}
   Total we owe: {format_bytes(stats['total_we_owe'])}
-  Peers with balance: {stats['peers_with_balance']}
   Debt limit: {format_bytes(stats['debt_limit'])}
 """)
+            
+            # [MARKET] Service commands
+            elif cmd == "services":
+                services = agent_manager.list_services()
+                if not services:
+                    print("[INFO] No services registered")
+                else:
+                    print(f"[INFO] Available services ({len(services)}):")
+                    for svc in services:
+                        print(f"  - {svc['service_name']}: {svc['description']}")
+                        print(f"    Price: {svc['price_per_unit']} per unit")
+            
+            elif cmd == "echo":
+                # echo <peer_id> <text>
+                parts = args.split(maxsplit=1)
+                if len(parts) < 2:
+                    print("[ERROR] Usage: echo <peer_id_prefix> <text>")
+                    continue
+                
+                peer_prefix, text = parts
+                
+                target_peer = None
+                for peer in node.peer_manager.get_active_peers():
+                    if peer.node_id.startswith(peer_prefix) or peer.node_id[:16].startswith(peer_prefix):
+                        target_peer = peer
+                        break
+                
+                if not target_peer:
+                    print(f"[ERROR] Peer not found: {peer_prefix}")
+                    continue
+                
+                # Отправляем Echo запрос
+                budget = len(text) / 10 + 1  # Примерный бюджет
+                success = await node.request_service(
+                    target_peer.node_id,
+                    "echo",
+                    text,
+                    budget,
+                )
+                
+                if success:
+                    print(f"[OK] Echo request sent to {target_peer.node_id[:16]}...")
+                    print(f"     Payload: '{text}' ({len(text)} bytes)")
+                    print(f"     Budget: {budget:.2f} units")
+                    print("     Waiting for response...")
+                else:
+                    print(f"[ERROR] Failed to send echo request")
+            
+            elif cmd == "request":
+                # request <peer_id> <service> <payload> <budget>
+                parts = args.split(maxsplit=3)
+                if len(parts) < 4:
+                    print("[ERROR] Usage: request <peer_id> <service_name> <payload> <budget>")
+                    continue
+                
+                peer_prefix, service_name, payload, budget_str = parts
+                
+                try:
+                    budget = float(budget_str)
+                except ValueError:
+                    print(f"[ERROR] Invalid budget: {budget_str}")
+                    continue
+                
+                target_peer = None
+                for peer in node.peer_manager.get_active_peers():
+                    if peer.node_id.startswith(peer_prefix) or peer.node_id[:16].startswith(peer_prefix):
+                        target_peer = peer
+                        break
+                
+                if not target_peer:
+                    print(f"[ERROR] Peer not found: {peer_prefix}")
+                    continue
+                
+                success = await node.request_service(
+                    target_peer.node_id,
+                    service_name,
+                    payload,
+                    budget,
+                )
+                
+                if success:
+                    print(f"[OK] Service request sent: {service_name}")
+                else:
+                    print(f"[ERROR] Failed to send request")
             
             else:
                 print(f"[ERROR] Unknown command: {cmd}. Type 'help' for commands.")
@@ -377,21 +436,9 @@ Balance Statistics:
 async def main() -> None:
     """
     Главная функция - точка входа.
-    
-    [DECENTRALIZATION] Запускает полностью автономный узел:
-    1. Загружает/создает идентичность
-    2. Инициализирует все модули
-    3. Запускает сервер
-    4. Подключается к сети
-    5. Обрабатывает события
-    
-    [ECONOMY] Layer 2:
-    - Инициализирует Ledger для учета трафика
-    - Передает Ledger в Node для автоматического учета
-    - Регистрирует callbacks для обновления Trust Score
     """
     parser = argparse.ArgumentParser(
-        description="P2P Network Node (Layer 2: Economy)",
+        description="P2P Network Node (Layer 3: Market)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -401,11 +448,10 @@ Examples:
   # Connect to existing network
   python main.py --port 8469 --bootstrap 127.0.0.1:8468
   
-  # Use custom identity file
-  python main.py --identity my_node.key
-  
-  # Set custom debt limit (50MB)
-  python main.py --debt-limit 52428800
+  # Test Echo service between two nodes:
+  # Terminal 1: python main.py --port 8468
+  # Terminal 2: python main.py --port 8469 --bootstrap 127.0.0.1:8468
+  # In Terminal 2: echo <peer_id> Hello World
 """,
     )
     parser.add_argument(
@@ -442,7 +488,7 @@ Examples:
         "--debt-limit",
         type=int,
         default=DEFAULT_DEBT_LIMIT_BYTES,
-        help=f"Debt limit in bytes before blocking peer (default: {DEFAULT_DEBT_LIMIT_BYTES} = 100MB)",
+        help=f"Debt limit in bytes (default: {DEFAULT_DEBT_LIMIT_BYTES})",
     )
     parser.add_argument(
         "--masking", "-m",
@@ -473,36 +519,34 @@ Examples:
     # Загружаем идентичность
     crypto = load_or_create_identity(args.identity)
     
-    # Инициализируем Ledger с лимитом долга
+    # Инициализируем Ledger
     ledger = Ledger(args.db, debt_limit=args.debt_limit)
     await ledger.initialize()
-    logger.info(f"[LEDGER] Initialized: {args.db}, debt_limit={format_bytes(args.debt_limit)}")
+    logger.info(f"[LEDGER] Initialized: {args.db}")
     
-    agent_manager = AgentManager()
-    logger.info(f"[AGENTS] Initialized: {agent_manager.contracts_dir}")
+    # [MARKET] Инициализируем AgentManager с Ledger и node_id
+    agent_manager = AgentManager(ledger=ledger, node_id=crypto.node_id)
+    logger.info(f"[AGENTS] Initialized with services: {list(agent_manager._agents.keys())}")
     
-    # Создаем узел с интегрированным ledger
+    # Создаем узел с интегрированным ledger и agent_manager
     node = Node(
         crypto=crypto,
         host=args.host,
         port=args.port,
         use_masking=args.masking,
-        ledger=ledger,  # [ECONOMY] Передаем ledger для автоматического учета
+        ledger=ledger,
+        agent_manager=agent_manager,
     )
     
-    # Регистрируем callback для обновления Trust Score
+    # Callbacks
     async def on_peer_connected(peer):
         await ledger.get_or_create_peer(peer.node_id)
         await ledger.update_trust_score(peer.node_id, "ping_responded")
-        logger.info(f"[ECONOMY] Peer connected: {peer.node_id[:12]}...")
     
     async def on_peer_disconnected(peer):
         await ledger.update_trust_score(peer.node_id, "ping_timeout")
         balance = await ledger.get_balance(peer.node_id)
-        logger.info(
-            f"[ECONOMY] Peer disconnected: {peer.node_id[:12]}..., "
-            f"final_balance={balance:+.0f}"
-        )
+        logger.info(f"[ECONOMY] Peer disconnected: {peer.node_id[:12]}..., balance={balance:+.0f}")
     
     async def on_message(message, peer):
         if crypto.verify_signature(message):
@@ -510,22 +554,26 @@ Examples:
         else:
             await ledger.update_trust_score(peer.node_id, "invalid_message")
     
-    async def on_balance_received(peer_id: str, their_balance: float):
-        our_balance = await ledger.get_balance(peer_id)
-        logger.debug(
-            f"[ECONOMY] Balance exchange with {peer_id[:12]}...: "
-            f"ours={our_balance:+.0f}, theirs={their_balance:+.0f}"
-        )
+    async def on_service_response(response: ServiceResponse, sender_id: str):
+        """Callback для ответов на запросы услуг."""
+        if response.success:
+            print(f"\n[SERVICE] Response from {sender_id[:12]}...")
+            print(f"  Result: {response.result}")
+            print(f"  Cost: {response.cost:.2f} units")
+            print(f"  Time: {response.execution_time:.3f}s")
+        else:
+            print(f"\n[SERVICE] Error from {sender_id[:12]}...: {response.error}")
+        print(">>> ", end="", flush=True)  # Восстанавливаем промпт
     
     node.on_peer_connected(on_peer_connected)
     node.on_peer_disconnected(on_peer_disconnected)
     node.on_message(on_message)
-    node.on_balance_received(on_balance_received)
+    node.on_service_response(on_service_response)
     
     # Запускаем узел
     await node.start()
     
-    # Настраиваем graceful shutdown
+    # Graceful shutdown
     shutdown_event = asyncio.Event()
     
     def signal_handler():
@@ -537,19 +585,15 @@ Examples:
         try:
             loop.add_signal_handler(sig, signal_handler)
         except NotImplementedError:
-            # Windows не поддерживает add_signal_handler
             pass
     
     try:
         if args.no_shell:
-            # Работаем как демон
             logger.info("[MAIN] Running in daemon mode. Press Ctrl+C to stop.")
             await shutdown_event.wait()
         else:
-            # Запускаем интерактивную оболочку
             await interactive_shell(node, ledger, agent_manager)
     finally:
-        # Останавливаем узел
         await node.stop()
         await ledger.close()
         logger.info("[MAIN] Shutdown complete")

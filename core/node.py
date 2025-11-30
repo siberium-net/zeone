@@ -36,6 +36,7 @@ from .protocol import (
 
 if TYPE_CHECKING:
     from economy.ledger import Ledger
+    from agents.manager import AgentManager, ServiceResponse
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -285,6 +286,7 @@ class Node:
         port: int = 8468,
         use_masking: bool = False,
         ledger: Optional["Ledger"] = None,
+        agent_manager: Optional["AgentManager"] = None,
     ):
         """
         Инициализация узла.
@@ -295,6 +297,7 @@ class Node:
             port: Порт для прослушивания
             use_masking: Использовать HTTP-маскировку трафика
             ledger: Экземпляр Ledger для учета трафика (Layer 2)
+            agent_manager: Менеджер услуг (Layer 3: Market)
         """
         self.crypto = crypto
         self.host = host
@@ -303,6 +306,9 @@ class Node:
         
         # [ECONOMY] Ledger для учета долгов
         self.ledger = ledger
+        
+        # [MARKET] AgentManager для обработки запросов услуг
+        self.agent_manager = agent_manager
         
         # Менеджер пиров
         self.peer_manager = PeerManager(max_peers=config.network.max_peers)
@@ -324,6 +330,9 @@ class Node:
         
         # [ECONOMY] Callback для обработки баланса
         self._on_balance_received: List[Callable[[str, float], Awaitable[None]]] = []
+        
+        # [MARKET] Callback для ответов на запросы услуг
+        self._on_service_response: List[Callable[["ServiceResponse", str], Awaitable[None]]] = []
         
         logger.info(f"[NODE] Initialized with ID: {self.node_id[:16]}...")
     
@@ -662,6 +671,8 @@ class Node:
                     "peer": peer,
                     "peer_manager": self.peer_manager,
                     "ledger": self.ledger,
+                    "agent_manager": self.agent_manager,
+                    "on_service_response": self._handle_service_response,
                 }
                 
                 response = await self.router.route(message, self.crypto, context)
@@ -892,6 +903,15 @@ class Node:
         """
         self._on_balance_received.append(callback)
     
+    def on_service_response(self, callback: Callable[["ServiceResponse", str], Awaitable[None]]) -> None:
+        """
+        Зарегистрировать callback на ответ по услуге.
+        
+        [MARKET] Callback вызывается когда приходит ответ на SERVICE_REQUEST.
+        Args: (response, provider_node_id)
+        """
+        self._on_service_response.append(callback)
+    
     def set_ledger(self, ledger: "Ledger") -> None:
         """
         Установить Ledger для учета трафика.
@@ -899,6 +919,105 @@ class Node:
         [ECONOMY] Можно установить ledger после создания Node.
         """
         self.ledger = ledger
+    
+    def set_agent_manager(self, agent_manager: "AgentManager") -> None:
+        """
+        Установить AgentManager для обработки запросов услуг.
+        
+        [MARKET] Можно установить после создания Node.
+        """
+        self.agent_manager = agent_manager
+    
+    async def _handle_service_response(self, response: "ServiceResponse", sender_id: str) -> None:
+        """
+        Обработать ответ на запрос услуги.
+        
+        [MARKET] Вызывается когда приходит SERVICE_RESPONSE.
+        """
+        logger.info(
+            f"[NODE] Service response from {sender_id[:8]}...: "
+            f"success={response.success}, cost={response.cost:.2f}"
+        )
+        
+        # Вызываем зарегистрированные callbacks
+        for callback in self._on_service_response:
+            await callback(response, sender_id)
+    
+    async def request_service(
+        self,
+        peer_id: str,
+        service_name: str,
+        payload: Any,
+        budget: float,
+    ) -> bool:
+        """
+        Отправить запрос на услугу пиру.
+        
+        [MARKET] Создает SERVICE_REQUEST и отправляет указанному пиру.
+        
+        Args:
+            peer_id: ID пира-провайдера услуги
+            service_name: Название услуги ("echo", "storage", etc.)
+            payload: Данные для обработки
+            budget: Максимальный бюджет
+        
+        Returns:
+            True если запрос отправлен
+        """
+        from .protocol import ServiceRequestHandler
+        
+        peer = self.peer_manager.get_peer(peer_id)
+        if not peer:
+            logger.warning(f"[NODE] Peer not found for service request: {peer_id[:8]}...")
+            return False
+        
+        # Создаем запрос
+        request = ServiceRequestHandler.create_service_request(
+            self.crypto,
+            service_name,
+            payload,
+            budget,
+        )
+        
+        # Отправляем
+        if self.ledger:
+            success, _, reason = await peer.send_with_accounting(
+                request, self.ledger, self.use_masking
+            )
+        else:
+            success = await peer.send(request, self.use_masking)
+            reason = "OK" if success else "Send failed"
+        
+        if success:
+            logger.info(
+                f"[NODE] Service request sent to {peer_id[:8]}...: "
+                f"service={service_name}, budget={budget}"
+            )
+        else:
+            logger.warning(f"[NODE] Failed to send service request: {reason}")
+        
+        return success
+    
+    async def broadcast_service_request(
+        self,
+        service_name: str,
+        payload: Any,
+        budget: float,
+    ) -> int:
+        """
+        Отправить запрос на услугу всем пирам.
+        
+        [MARKET] Полезно для поиска провайдера услуги.
+        Первый ответ выигрывает.
+        
+        Returns:
+            Количество отправленных запросов
+        """
+        count = 0
+        for peer in self.peer_manager.get_active_peers():
+            if await self.request_service(peer.node_id, service_name, payload, budget):
+                count += 1
+        return count
 
 
 class UDPDiscovery:

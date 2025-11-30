@@ -378,6 +378,183 @@ class DataHandler(MessageHandler):
         return None
 
 
+class ServiceRequestHandler(MessageHandler):
+    """
+    Обработчик SERVICE_REQUEST сообщений.
+    
+    [MARKET] Layer 3 - Рынок услуг:
+    - Получает запрос на услугу от другого узла
+    - Передает запрос в AgentManager
+    - Возвращает результат и записывает долг в Ledger
+    
+    [ECONOMY] Процесс:
+    1. Узел A отправляет SERVICE_REQUEST с payload и budget
+    2. Узел B проверяет подпись и наличие услуги
+    3. AgentManager выполняет услугу
+    4. Стоимость записывается в Ledger (A должен B)
+    5. SERVICE_RESPONSE отправляется обратно A
+    """
+    
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.SERVICE_REQUEST
+    
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """
+        Обработать SERVICE_REQUEST.
+        
+        [ECONOMY] При успешном выполнении:
+        - Стоимость записывается в Ledger автоматически через AgentManager
+        - Результат возвращается отправителю
+        """
+        # Проверяем подпись
+        if not crypto.verify_signature(message):
+            return self._create_error_response(
+                crypto, message, "Invalid signature"
+            )
+        
+        # Получаем AgentManager из контекста
+        agent_manager = context.get("agent_manager")
+        if not agent_manager:
+            return self._create_error_response(
+                crypto, message, "No agent manager available"
+            )
+        
+        # Извлекаем данные запроса
+        payload = message.payload
+        service_name = payload.get("service_name", "")
+        service_payload = payload.get("payload")
+        budget = payload.get("budget", 0)
+        request_id = payload.get("request_id", "")
+        
+        if not service_name:
+            return self._create_error_response(
+                crypto, message, "Missing service_name"
+            )
+        
+        # Импортируем здесь чтобы избежать циклических импортов
+        from agents.manager import ServiceRequest
+        
+        # Создаем запрос
+        request = ServiceRequest(
+            service_name=service_name,
+            payload=service_payload,
+            requester_id=message.sender_id,
+            budget=budget,
+            request_id=request_id,
+        )
+        
+        # Обрабатываем запрос через AgentManager
+        response = await agent_manager.handle_request(request)
+        
+        # Формируем ответное сообщение
+        reply = Message(
+            type=MessageType.SERVICE_RESPONSE,
+            payload=response.to_dict(),
+            sender_id=crypto.node_id,
+        )
+        
+        return crypto.sign_message(reply)
+    
+    def _create_error_response(
+        self,
+        crypto: Crypto,
+        request: Message,
+        error: str
+    ) -> Message:
+        """Создать ответ с ошибкой."""
+        reply = Message(
+            type=MessageType.SERVICE_RESPONSE,
+            payload={
+                "success": False,
+                "result": None,
+                "cost": 0,
+                "execution_time": 0,
+                "request_id": request.payload.get("request_id", ""),
+                "error": error,
+                "provider_id": crypto.node_id,
+            },
+            sender_id=crypto.node_id,
+        )
+        return crypto.sign_message(reply)
+    
+    @staticmethod
+    def create_service_request(
+        crypto: Crypto,
+        service_name: str,
+        payload: Any,
+        budget: float,
+    ) -> Message:
+        """
+        Создать SERVICE_REQUEST сообщение.
+        
+        Args:
+            crypto: Криптомодуль для подписи
+            service_name: Название услуги ("echo", "storage", etc.)
+            payload: Данные для обработки
+            budget: Максимальный бюджет
+        
+        Returns:
+            Подписанное сообщение SERVICE_REQUEST
+        """
+        import hashlib
+        
+        request_id = hashlib.sha256(
+            f"{service_name}:{crypto.node_id}:{time.time()}".encode()
+        ).hexdigest()[:16]
+        
+        msg = Message(
+            type=MessageType.SERVICE_REQUEST,
+            payload={
+                "service_name": service_name,
+                "payload": payload,
+                "budget": budget,
+                "request_id": request_id,
+            },
+            sender_id=crypto.node_id,
+        )
+        return crypto.sign_message(msg)
+
+
+class ServiceResponseHandler(MessageHandler):
+    """
+    Обработчик SERVICE_RESPONSE сообщений.
+    
+    [MARKET] Обрабатывает ответы на наши запросы услуг.
+    """
+    
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.SERVICE_RESPONSE
+    
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """Обработать SERVICE_RESPONSE."""
+        if not crypto.verify_signature(message):
+            return None
+        
+        # Сохраняем ответ в контексте для обработки
+        context["service_response"] = message.payload
+        
+        # Callback если есть
+        callback = context.get("on_service_response")
+        if callback:
+            from agents.manager import ServiceResponse
+            response = ServiceResponse.from_dict(message.payload)
+            await callback(response, message.sender_id)
+        
+        return None
+
+
 class ProtocolRouter:
     """
     Маршрутизатор протокола.
@@ -394,6 +571,10 @@ class ProtocolRouter:
         self.register(DiscoverHandler())
         self.register(PeerListHandler())
         self.register(DataHandler())
+        
+        # [MARKET] Layer 3 - обработчики услуг
+        self.register(ServiceRequestHandler())
+        self.register(ServiceResponseHandler())
     
     def register(self, handler: MessageHandler) -> None:
         """Зарегистрировать обработчик."""
