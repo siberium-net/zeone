@@ -1,14 +1,20 @@
 """
-Ledger - Экономический модуль P2P сети
-======================================
+Ledger - Экономический модуль P2P сети (Layer 2)
+================================================
 
 [DECENTRALIZATION] Этот модуль реализует децентрализованную экономику:
 - Локальная база данных для каждого узла
 - Trust Score на основе поведения пиров
 - IOU (долговые расписки) с криптографическими подписями
+- Учет долгов: record_debt / record_claim / get_balance
 
 [SECURITY] Все транзакции подписываются приватным ключом.
 Каждый узел может независимо верифицировать подписи.
+
+[ECONOMY] Система балансов:
+- Положительный баланс = пир должен нам (мы раздали больше)
+- Отрицательный баланс = мы должны пиру (мы потребили больше)
+- Блокировка отправки при большом долге пира (защита от leechers)
 """
 
 import asyncio
@@ -16,6 +22,7 @@ import time
 import json
 import hashlib
 import base64
+import logging
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
@@ -23,6 +30,12 @@ from pathlib import Path
 import aiosqlite
 
 from config import config
+
+logger = logging.getLogger(__name__)
+
+
+# Лимит долга в байтах (100 MB по умолчанию)
+DEFAULT_DEBT_LIMIT_BYTES = 100 * 1024 * 1024
 
 
 @dataclass
@@ -38,10 +51,10 @@ class Transaction:
     id: str  # SHA256 хеш содержимого
     from_id: str  # node_id отправителя
     to_id: str  # node_id получателя
-    amount: float  # Количество "кредитов"
+    amount: float  # Количество байтов данных
     timestamp: float
     signature: str  # Подпись отправителя
-    tx_type: str = "transfer"  # Тип транзакции
+    tx_type: str = "transfer"  # Тип: "debt" | "claim" | "transfer"
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
@@ -200,6 +213,8 @@ class TrustScore:
         "iou_defaulted": -0.1,            # IOU просрочен
         "ping_responded": 0.001,          # Ответил на PING
         "ping_timeout": -0.01,            # Не ответил на PING
+        "debt_repaid": 0.02,              # Долг погашен
+        "excessive_debt": -0.03,          # Превышен лимит долга
     }
     
     @classmethod
@@ -244,15 +259,30 @@ class Ledger:
     - Транзакции с участием этого узла
     - IOU где узел является debtor или creditor
     - Trust Score для известных пиров
+    - Балансы: кто кому сколько должен
     
     Нет "главной" копии - каждый узел авторитетен для своих данных.
     Согласованность достигается через криптографические подписи.
+    
+    [ECONOMY] Методы учета:
+    - record_debt(peer_id, amount): мы потребили данные от peer (увеличиваем наш долг)
+    - record_claim(peer_id, amount): мы раздали данные peer (увеличиваем долг peer)
+    - get_balance(peer_id): сальдо (+ = нам должны, - = мы должны)
     """
     
-    def __init__(self, db_path: str = "ledger.db"):
+    def __init__(
+        self,
+        db_path: str = "ledger.db",
+        debt_limit: int = DEFAULT_DEBT_LIMIT_BYTES,
+    ):
         self.db_path = db_path
+        self.debt_limit = debt_limit  # Лимит долга в байтах
         self._db: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()
+        
+        # Кэш балансов для быстрого доступа (peer_id -> balance)
+        self._balance_cache: Dict[str, float] = {}
+        self._cache_valid = False
     
     async def initialize(self) -> None:
         """
@@ -312,12 +342,29 @@ class Ledger:
             )
         """)
         
+        # [NEW] Таблица балансов для быстрого учета долгов
+        # balance > 0: peer должен нам
+        # balance < 0: мы должны peer
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS balances (
+                peer_id TEXT PRIMARY KEY,
+                balance REAL DEFAULT 0,
+                total_sent REAL DEFAULT 0,
+                total_received REAL DEFAULT 0,
+                last_updated REAL,
+                FOREIGN KEY (peer_id) REFERENCES peers(node_id)
+            )
+        """)
+        
         # Индексы для быстрого поиска
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_tx_from ON transactions(from_id)"
         )
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_tx_to ON transactions(to_id)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(tx_type)"
         )
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_iou_debtor ON ious(debtor_id)"
@@ -327,6 +374,16 @@ class Ledger:
         )
         
         await self._db.commit()
+        
+        # Загружаем кэш балансов
+        await self._load_balance_cache()
+    
+    async def _load_balance_cache(self) -> None:
+        """Загрузить балансы в кэш."""
+        cursor = await self._db.execute("SELECT peer_id, balance FROM balances")
+        rows = await cursor.fetchall()
+        self._balance_cache = {row[0]: row[1] for row in rows}
+        self._cache_valid = True
     
     async def close(self) -> None:
         """Закрыть соединение с базой данных."""
@@ -334,7 +391,368 @@ class Ledger:
             await self._db.close()
             self._db = None
     
-    # --- Peer Management ---
+    # =========================================================================
+    # BALANCE MANAGEMENT - Учет долгов
+    # =========================================================================
+    
+    async def record_debt(
+        self,
+        peer_id: str,
+        amount: float,
+        signature: str = "",
+    ) -> float:
+        """
+        Записать, что мы должны соседу (потребление).
+        
+        [ECONOMY] Вызывается при ПОЛУЧЕНИИ данных от peer.
+        Уменьшает наш баланс (делает его более отрицательным).
+        
+        Args:
+            peer_id: ID пира, от которого получили данные
+            amount: Количество байтов данных
+            signature: Подпись транзакции (для верификации)
+        
+        Returns:
+            Новый баланс с этим пиром
+        """
+        async with self._lock:
+            # Получаем или создаем запись баланса
+            cursor = await self._db.execute(
+                "SELECT balance, total_received FROM balances WHERE peer_id = ?",
+                (peer_id,)
+            )
+            row = await cursor.fetchone()
+            
+            if row:
+                new_balance = row[0] - amount  # Уменьшаем баланс (мы должны больше)
+                new_received = row[1] + amount
+                await self._db.execute(
+                    """
+                    UPDATE balances 
+                    SET balance = ?, total_received = ?, last_updated = ?
+                    WHERE peer_id = ?
+                    """,
+                    (new_balance, new_received, time.time(), peer_id)
+                )
+            else:
+                new_balance = -amount  # Начинаем с отрицательного
+                await self._db.execute(
+                    """
+                    INSERT INTO balances (peer_id, balance, total_sent, total_received, last_updated)
+                    VALUES (?, ?, 0, ?, ?)
+                    """,
+                    (peer_id, new_balance, amount, time.time())
+                )
+            
+            # Записываем транзакцию
+            tx_data = {
+                "from_id": peer_id,
+                "to_id": "self",
+                "amount": amount,
+                "timestamp": time.time(),
+                "tx_type": "debt",
+            }
+            tx_id = hashlib.sha256(
+                json.dumps(tx_data, sort_keys=True).encode()
+            ).hexdigest()
+            
+            await self._db.execute(
+                """
+                INSERT OR IGNORE INTO transactions 
+                (id, from_id, to_id, amount, timestamp, signature, tx_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (tx_id, peer_id, "self", amount, time.time(), signature, "debt")
+            )
+            
+            await self._db.commit()
+            
+            # Обновляем кэш
+            self._balance_cache[peer_id] = new_balance
+            
+            logger.debug(f"[LEDGER] Recorded debt to {peer_id[:8]}...: {amount} bytes, balance: {new_balance}")
+            return new_balance
+    
+    async def record_claim(
+        self,
+        peer_id: str,
+        amount: float,
+        signature: str = "",
+    ) -> float:
+        """
+        Записать, что сосед должен нам (раздача).
+        
+        [ECONOMY] Вызывается при ОТПРАВКЕ данных peer.
+        Увеличивает наш баланс (peer должен нам больше).
+        
+        Args:
+            peer_id: ID пира, которому отправили данные
+            amount: Количество байтов данных
+            signature: Подпись транзакции
+        
+        Returns:
+            Новый баланс с этим пиром
+        """
+        async with self._lock:
+            # Получаем или создаем запись баланса
+            cursor = await self._db.execute(
+                "SELECT balance, total_sent FROM balances WHERE peer_id = ?",
+                (peer_id,)
+            )
+            row = await cursor.fetchone()
+            
+            if row:
+                new_balance = row[0] + amount  # Увеличиваем баланс (нам должны больше)
+                new_sent = row[1] + amount
+                await self._db.execute(
+                    """
+                    UPDATE balances 
+                    SET balance = ?, total_sent = ?, last_updated = ?
+                    WHERE peer_id = ?
+                    """,
+                    (new_balance, new_sent, time.time(), peer_id)
+                )
+            else:
+                new_balance = amount  # Начинаем с положительного
+                await self._db.execute(
+                    """
+                    INSERT INTO balances (peer_id, balance, total_sent, total_received, last_updated)
+                    VALUES (?, ?, ?, 0, ?)
+                    """,
+                    (peer_id, new_balance, amount, time.time())
+                )
+            
+            # Записываем транзакцию
+            tx_data = {
+                "from_id": "self",
+                "to_id": peer_id,
+                "amount": amount,
+                "timestamp": time.time(),
+                "tx_type": "claim",
+            }
+            tx_id = hashlib.sha256(
+                json.dumps(tx_data, sort_keys=True).encode()
+            ).hexdigest()
+            
+            await self._db.execute(
+                """
+                INSERT OR IGNORE INTO transactions 
+                (id, from_id, to_id, amount, timestamp, signature, tx_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (tx_id, "self", peer_id, amount, time.time(), signature, "claim")
+            )
+            
+            await self._db.commit()
+            
+            # Обновляем кэш
+            self._balance_cache[peer_id] = new_balance
+            
+            logger.debug(f"[LEDGER] Recorded claim from {peer_id[:8]}...: {amount} bytes, balance: {new_balance}")
+            return new_balance
+    
+    async def get_balance(self, peer_id: str) -> float:
+        """
+        Получить сальдо с пиром.
+        
+        [ECONOMY] Возвращает баланс:
+        - Положительный: peer должен нам (мы раздали больше)
+        - Отрицательный: мы должны peer (мы потребили больше)
+        - Ноль: баланс сведен
+        
+        Args:
+            peer_id: ID пира
+        
+        Returns:
+            Баланс в байтах
+        """
+        # Сначала проверяем кэш
+        if self._cache_valid and peer_id in self._balance_cache:
+            return self._balance_cache[peer_id]
+        
+        # Иначе запрашиваем из БД
+        cursor = await self._db.execute(
+            "SELECT balance FROM balances WHERE peer_id = ?",
+            (peer_id,)
+        )
+        row = await cursor.fetchone()
+        
+        balance = row[0] if row else 0.0
+        self._balance_cache[peer_id] = balance
+        return balance
+    
+    async def get_balance_info(self, peer_id: str) -> Dict[str, Any]:
+        """
+        Получить подробную информацию о балансе с пиром.
+        
+        Returns:
+            Dict с balance, total_sent, total_received, last_updated
+        """
+        cursor = await self._db.execute(
+            "SELECT balance, total_sent, total_received, last_updated FROM balances WHERE peer_id = ?",
+            (peer_id,)
+        )
+        row = await cursor.fetchone()
+        
+        if row:
+            return {
+                "peer_id": peer_id,
+                "balance": row[0],
+                "total_sent": row[1],
+                "total_received": row[2],
+                "last_updated": row[3],
+            }
+        
+        return {
+            "peer_id": peer_id,
+            "balance": 0.0,
+            "total_sent": 0.0,
+            "total_received": 0.0,
+            "last_updated": None,
+        }
+    
+    async def get_all_balances(self) -> List[Dict[str, Any]]:
+        """Получить балансы со всеми пирами."""
+        cursor = await self._db.execute(
+            "SELECT peer_id, balance, total_sent, total_received FROM balances ORDER BY balance DESC"
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "peer_id": row[0],
+                "balance": row[1],
+                "total_sent": row[2],
+                "total_received": row[3],
+            }
+            for row in rows
+        ]
+    
+    def is_peer_blocked(self, peer_id: str) -> bool:
+        """
+        Проверить, заблокирован ли пир из-за превышения лимита долга.
+        
+        [ECONOMY] Блокировка включается если:
+        - Баланс > debt_limit (peer должен нам слишком много)
+        - Это защита от "пиявок" (leechers)
+        
+        Returns:
+            True если peer заблокирован (не отправляем ему данные)
+        """
+        balance = self._balance_cache.get(peer_id, 0.0)
+        # Блокируем если peer должен нам больше лимита
+        return balance > self.debt_limit
+    
+    async def check_can_send(self, peer_id: str) -> Tuple[bool, str]:
+        """
+        Проверить, можно ли отправлять данные пиру.
+        
+        [ECONOMY] BLOCKING MECHANISM:
+        Если peer имеет слишком большой долг - блокируем отправку.
+        
+        Returns:
+            (can_send, reason)
+        """
+        balance = await self.get_balance(peer_id)
+        
+        if balance > self.debt_limit:
+            return (
+                False,
+                f"Peer debt exceeds limit: {balance:.0f} > {self.debt_limit} bytes"
+            )
+        
+        return (True, "OK")
+    
+    async def reset_balance(self, peer_id: str) -> None:
+        """
+        Сбросить баланс с пиром (после погашения долга).
+        """
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE balances SET balance = 0, last_updated = ? WHERE peer_id = ?",
+                (time.time(), peer_id)
+            )
+            await self._db.commit()
+            self._balance_cache[peer_id] = 0.0
+    
+    # =========================================================================
+    # HANDSHAKE BALANCE EXCHANGE - Обмен балансом при соединении
+    # =========================================================================
+    
+    async def get_balance_claim(self, peer_id: str) -> Dict[str, Any]:
+        """
+        Получить данные о балансе для отправки при handshake.
+        
+        [ECONOMY] При соединении узлы обмениваются информацией:
+        "Ты помнишь, что ты мне должен X байт?"
+        
+        Returns:
+            Dict с информацией о нашем видении баланса
+        """
+        info = await self.get_balance_info(peer_id)
+        return {
+            "claimed_balance": info["balance"],
+            "total_sent": info["total_sent"],
+            "total_received": info["total_received"],
+            "timestamp": time.time(),
+        }
+    
+    async def reconcile_balance(
+        self,
+        peer_id: str,
+        peer_claimed_balance: float,
+        our_balance: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Согласовать баланс с пиром.
+        
+        [ECONOMY] При расхождении балансов:
+        - Если разница небольшая - усредняем
+        - Если большая - требуем IOU или отключаем
+        
+        Args:
+            peer_id: ID пира
+            peer_claimed_balance: Баланс, который заявляет пир (с его стороны)
+            our_balance: Наш баланс (если None - берем из БД)
+        
+        Returns:
+            Dict с результатом согласования
+        """
+        if our_balance is None:
+            our_balance = await self.get_balance(peer_id)
+        
+        # Peer видит баланс инвертированно (что для нас + для него -)
+        peer_view = -peer_claimed_balance
+        
+        difference = abs(our_balance - peer_view)
+        
+        # Допустимое расхождение - 10% или 1MB
+        tolerance = max(abs(our_balance) * 0.1, 1024 * 1024)
+        
+        if difference <= tolerance:
+            # Балансы примерно совпадают
+            return {
+                "status": "agreed",
+                "our_balance": our_balance,
+                "peer_claimed": peer_claimed_balance,
+                "difference": difference,
+            }
+        else:
+            # Значительное расхождение
+            logger.warning(
+                f"[LEDGER] Balance mismatch with {peer_id[:8]}...: "
+                f"ours={our_balance:.0f}, peer_claims={peer_claimed_balance:.0f}"
+            )
+            return {
+                "status": "disputed",
+                "our_balance": our_balance,
+                "peer_claimed": peer_claimed_balance,
+                "difference": difference,
+                "action": "request_iou" if our_balance > peer_view else "provide_iou",
+            }
+    
+    # =========================================================================
+    # Peer Management
+    # =========================================================================
     
     async def get_or_create_peer(
         self,
@@ -448,7 +866,9 @@ class Ledger:
             for r in rows
         ]
     
-    # --- Transaction Management ---
+    # =========================================================================
+    # Transaction Management
+    # =========================================================================
     
     async def add_transaction(self, tx: Transaction) -> bool:
         """
@@ -550,7 +970,9 @@ class Ledger:
             for row in rows
         ]
     
-    # --- IOU Management ---
+    # =========================================================================
+    # IOU Management
+    # =========================================================================
     
     async def create_iou(
         self,
@@ -775,7 +1197,9 @@ class Ledger:
         
         return (owed_to_others, owed_by_others)
     
-    # --- Statistics ---
+    # =========================================================================
+    # Statistics
+    # =========================================================================
     
     async def get_stats(self) -> Dict[str, Any]:
         """Получить статистику реестра."""
@@ -791,10 +1215,21 @@ class Ledger:
         cursor = await self._db.execute("SELECT SUM(amount) FROM ious WHERE redeemed = 0")
         total_debt = (await cursor.fetchone())[0] or 0
         
+        # Статистика балансов
+        cursor = await self._db.execute(
+            "SELECT SUM(CASE WHEN balance > 0 THEN balance ELSE 0 END), "
+            "SUM(CASE WHEN balance < 0 THEN balance ELSE 0 END), "
+            "COUNT(*) FROM balances"
+        )
+        balance_row = await cursor.fetchone()
+        
         return {
             "peer_count": peer_count,
             "transaction_count": tx_count,
             "active_ious": active_ious,
             "total_outstanding_debt": total_debt,
+            "total_owed_to_us": balance_row[0] or 0,
+            "total_we_owe": abs(balance_row[1] or 0),
+            "peers_with_balance": balance_row[2] or 0,
+            "debt_limit": self.debt_limit,
         }
-

@@ -42,6 +42,8 @@ class MessageType(Enum):
     # Экономика
     IOU = auto()            # Долговая расписка
     IOU_ACK = auto()        # Подтверждение IOU
+    BALANCE_CLAIM = auto()  # Заявление о балансе при handshake
+    BALANCE_ACK = auto()    # Подтверждение баланса
     
     # Агенты
     CONTRACT = auto()       # Код контракта
@@ -444,4 +446,98 @@ class SimpleTransport:
         """Распаковать сообщение."""
         payload = data.decode("utf-8")
         return Message.from_json(payload)
+    
+    @staticmethod
+    def get_payload_size(data: bytes) -> int:
+        """Получить размер payload в байтах."""
+        return len(data)
+
+
+class BlockingTransport:
+    """
+    Транспорт с блокировкой для защиты от leechers.
+    
+    [ECONOMY] BLOCKING MECHANISM:
+    Перед отправкой данных проверяет баланс пира.
+    Если peer имеет слишком большой долг - блокирует отправку.
+    
+    Это защита от "пиявок" (Leechers) которые только потребляют
+    и не раздают данные.
+    """
+    
+    def __init__(self, ledger: "Ledger"):  # type: ignore
+        """
+        Args:
+            ledger: Экземпляр Ledger для проверки балансов
+        """
+        self.ledger = ledger
+    
+    async def can_send_to(self, peer_id: str) -> tuple:
+        """
+        Проверить, можно ли отправлять данные пиру.
+        
+        [ECONOMY] Блокировка включается если:
+        - Баланс пира превышает лимит (peer должен нам слишком много)
+        
+        Returns:
+            (can_send: bool, reason: str)
+        """
+        return await self.ledger.check_can_send(peer_id)
+    
+    def is_blocked(self, peer_id: str) -> bool:
+        """
+        Быстрая синхронная проверка блокировки (из кэша).
+        
+        Returns:
+            True если peer заблокирован
+        """
+        return self.ledger.is_peer_blocked(peer_id)
+    
+    async def pack_with_accounting(
+        self,
+        message: Message,
+        peer_id: str,
+    ) -> tuple:
+        """
+        Упаковать сообщение с учетом в ledger.
+        
+        [ECONOMY] Автоматически записывает claim (peer будет должен нам).
+        
+        Returns:
+            (data: bytes, size: int, blocked: bool, reason: str)
+        """
+        # Проверяем блокировку
+        can_send, reason = await self.can_send_to(peer_id)
+        
+        if not can_send:
+            return (b"", 0, True, reason)
+        
+        # Упаковываем
+        data = SimpleTransport.pack(message)
+        size = len(data)
+        
+        # Записываем claim - peer будет должен нам за эти данные
+        await self.ledger.record_claim(peer_id, size)
+        
+        return (data, size, False, "OK")
+    
+    async def unpack_with_accounting(
+        self,
+        data: bytes,
+        peer_id: str,
+    ) -> Message:
+        """
+        Распаковать сообщение с учетом в ledger.
+        
+        [ECONOMY] Автоматически записывает debt (мы должны peer).
+        
+        Returns:
+            Message
+        """
+        # Записываем debt - мы получили данные, должны peer
+        size = len(data)
+        await self.ledger.record_debt(peer_id, size)
+        
+        # Распаковываем
+        return SimpleTransport.unpack(data)
 

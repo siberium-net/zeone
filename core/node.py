@@ -1,6 +1,6 @@
 """
-Node - Главный класс P2P узла
-=============================
+Node - Главный класс P2P узла (Layer 2: Economy)
+================================================
 
 [DECENTRALIZATION] Этот модуль реализует полностью децентрализованный узел:
 - Каждый узел равноправен (нет "главного" сервера)
@@ -10,6 +10,11 @@ Node - Главный класс P2P узла
 
 [SECURITY] Все соединения верифицируются криптографически.
 Узел общается только с проверенными пирами.
+
+[ECONOMY] Layer 2 - Экономика и репутация:
+- Автоматический учет трафика (record_debt / record_claim)
+- Блокировка leechers при превышении лимита долга
+- Обмен балансом при handshake
 """
 
 import asyncio
@@ -17,17 +22,20 @@ import logging
 import time
 import socket
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Set, Callable, Awaitable, Any, Tuple
+from typing import Optional, Dict, List, Set, Callable, Awaitable, Any, Tuple, TYPE_CHECKING
 from contextlib import suppress
 
 from config import config, NetworkConfig
-from .transport import Message, MessageType, Crypto, SimpleTransport, TrafficMasker
+from .transport import Message, MessageType, Crypto, SimpleTransport, TrafficMasker, BlockingTransport
 from .protocol import (
     ProtocolRouter,
     PingPongHandler,
     DiscoverHandler,
     PeerInfo,
 )
+
+if TYPE_CHECKING:
+    from economy.ledger import Ledger
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -40,6 +48,12 @@ class Peer:
     
     [DECENTRALIZATION] Каждый пир - это равноправный участник сети.
     Информация о пирах хранится локально, без центрального реестра.
+    
+    [ECONOMY] Каждый peer имеет:
+    - balance: текущий баланс (+ = должен нам, - = мы должны)
+    - bytes_sent: всего отправлено байт
+    - bytes_received: всего получено байт
+    - blocked: заблокирован ли из-за долга
     """
     
     node_id: str
@@ -53,6 +67,12 @@ class Peer:
     pending_pings: Dict[str, float] = field(default_factory=dict)  # nonce -> timestamp
     is_outbound: bool = False  # True если мы инициировали соединение
     
+    # [ECONOMY] Статистика трафика
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    blocked: bool = False  # Заблокирован из-за превышения долга
+    remote_balance_claim: Optional[float] = None  # Баланс, заявленный пиром при handshake
+    
     @property
     def is_connected(self) -> bool:
         """Проверить, активно ли соединение."""
@@ -63,6 +83,9 @@ class Peer:
         Отправить сообщение пиру.
         
         [SECURITY] Сообщение должно быть подписано перед отправкой.
+        
+        Note: Эта версия НЕ учитывает трафик в ledger.
+        Для учета используйте send_with_accounting().
         """
         if not self.is_connected:
             return False
@@ -75,10 +98,62 @@ class Peer:
             
             self.writer.write(data)
             await self.writer.drain()
+            self.bytes_sent += len(data)
             return True
         except (ConnectionError, OSError) as e:
             logger.warning(f"[PEER] Failed to send to {self.node_id[:8]}...: {e}")
             return False
+    
+    async def send_with_accounting(
+        self,
+        message: Message,
+        ledger: "Ledger",
+        use_masking: bool = False,
+    ) -> Tuple[bool, int, str]:
+        """
+        Отправить сообщение с учетом в ledger.
+        
+        [ECONOMY] Автоматически:
+        - Проверяет блокировку (превышение долга)
+        - Записывает claim в ledger
+        - Обновляет статистику
+        
+        Returns:
+            (success, bytes_sent, reason)
+        """
+        if not self.is_connected:
+            return (False, 0, "Not connected")
+        
+        if self.blocked:
+            return (False, 0, "Peer blocked due to excessive debt")
+        
+        # Проверяем блокировку в ledger
+        can_send, reason = await ledger.check_can_send(self.node_id)
+        if not can_send:
+            self.blocked = True
+            logger.warning(f"[PEER] Blocking {self.node_id[:8]}...: {reason}")
+            return (False, 0, reason)
+        
+        try:
+            if use_masking:
+                data = TrafficMasker.mask_as_http_request(message)
+            else:
+                data = SimpleTransport.pack(message)
+            
+            size = len(data)
+            
+            self.writer.write(data)
+            await self.writer.drain()
+            
+            # Учитываем в ledger - peer теперь должен нам
+            await ledger.record_claim(self.node_id, size)
+            
+            self.bytes_sent += size
+            return (True, size, "OK")
+            
+        except (ConnectionError, OSError) as e:
+            logger.warning(f"[PEER] Failed to send to {self.node_id[:8]}...: {e}")
+            return (False, 0, str(e))
     
     async def close(self) -> None:
         """Закрыть соединение с пиром."""
@@ -196,6 +271,11 @@ class Node:
     
     [SECURITY] Все сообщения подписываются и верифицируются.
     Нет доверия к неподписанным данным.
+    
+    [ECONOMY] Layer 2:
+    - Ведет учет трафика через Ledger
+    - Обменивается балансом при handshake
+    - Блокирует leechers
     """
     
     def __init__(
@@ -204,6 +284,7 @@ class Node:
         host: str = "0.0.0.0",
         port: int = 8468,
         use_masking: bool = False,
+        ledger: Optional["Ledger"] = None,
     ):
         """
         Инициализация узла.
@@ -213,11 +294,15 @@ class Node:
             host: Адрес для прослушивания
             port: Порт для прослушивания
             use_masking: Использовать HTTP-маскировку трафика
+            ledger: Экземпляр Ledger для учета трафика (Layer 2)
         """
         self.crypto = crypto
         self.host = host
         self.port = port
         self.use_masking = use_masking
+        
+        # [ECONOMY] Ledger для учета долгов
+        self.ledger = ledger
         
         # Менеджер пиров
         self.peer_manager = PeerManager(max_peers=config.network.max_peers)
@@ -236,6 +321,9 @@ class Node:
         self._on_peer_connected: List[Callable[[Peer], Awaitable[None]]] = []
         self._on_peer_disconnected: List[Callable[[Peer], Awaitable[None]]] = []
         self._on_message: List[Callable[[Message, Peer], Awaitable[None]]] = []
+        
+        # [ECONOMY] Callback для обработки баланса
+        self._on_balance_received: List[Callable[[str, float], Awaitable[None]]] = []
         
         logger.info(f"[NODE] Initialized with ID: {self.node_id[:16]}...")
     
@@ -340,6 +428,7 @@ class Node:
         1. Отправляем PING с нашей подписью
         2. Ожидаем PONG с подписью пира
         3. Верифицируем подпись - получаем node_id пира
+        4. [ECONOMY] Обмениваемся балансом
         
         Это гарантирует, что пир владеет заявленным ключом.
         """
@@ -393,6 +482,10 @@ class Node:
                 await peer.close()
                 return None
             
+            # [ECONOMY] Обмен балансом после успешного handshake
+            if self.ledger:
+                await self._exchange_balance(peer)
+            
             # Запускаем обработку входящих сообщений
             task = asyncio.create_task(self._read_loop(peer))
             self._tasks.add(task)
@@ -411,6 +504,42 @@ class Node:
             with suppress(Exception):
                 await writer.wait_closed()
             return None
+    
+    async def _exchange_balance(self, peer: Peer) -> None:
+        """
+        Обменяться информацией о балансе с пиром.
+        
+        [ECONOMY] При соединении узлы сообщают друг другу:
+        "Ты помнишь, что ты мне должен X байт?"
+        
+        Это позволяет:
+        - Восстановить баланс после реконнекта
+        - Обнаружить расхождения в учете
+        - Заблокировать должника если нужно
+        """
+        if not self.ledger:
+            return
+        
+        try:
+            # Получаем наше видение баланса
+            balance_claim = await self.ledger.get_balance_claim(peer.node_id)
+            
+            # Отправляем BALANCE_CLAIM
+            msg = Message(
+                type=MessageType.BALANCE_CLAIM,
+                payload=balance_claim,
+                sender_id=self.node_id,
+            )
+            signed = self.crypto.sign_message(msg)
+            await peer.send(signed, self.use_masking)
+            
+            logger.debug(
+                f"[NODE] Sent balance claim to {peer.node_id[:8]}...: "
+                f"{balance_claim['claimed_balance']:.0f} bytes"
+            )
+            
+        except Exception as e:
+            logger.warning(f"[NODE] Balance exchange failed: {e}")
     
     async def _handle_connection(
         self,
@@ -469,6 +598,10 @@ class Node:
                 await peer.close()
                 return
             
+            # [ECONOMY] Обмен балансом после успешного handshake
+            if self.ledger:
+                await self._exchange_balance(peer)
+            
             # Уведомляем о подключении
             for callback in self._on_peer_connected:
                 await callback(peer)
@@ -488,6 +621,10 @@ class Node:
         
         [DECENTRALIZATION] Каждое сообщение обрабатывается независимо.
         Узел может игнорировать сообщения от ненадежных пиров.
+        
+        [ECONOMY] При получении данных автоматически:
+        - Записывается debt в ledger (мы должны peer)
+        - Обновляется статистика bytes_received
         """
         try:
             while self._running and peer.is_connected:
@@ -497,22 +634,45 @@ class Node:
                 
                 # Читаем payload
                 payload = await peer.reader.readexactly(length)
+                
+                # [ECONOMY] Учитываем полученные данные
+                received_bytes = len(header) + len(payload)
+                peer.bytes_received += received_bytes
+                
+                if self.ledger:
+                    # Записываем debt - мы получили данные, должны peer
+                    await self.ledger.record_debt(peer.node_id, received_bytes)
+                
                 message = SimpleTransport.unpack(payload)
                 
                 # Обновляем last_seen
                 peer.last_seen = time.time()
                 
+                # [ECONOMY] Обработка BALANCE_CLAIM
+                if message.type == MessageType.BALANCE_CLAIM:
+                    await self._handle_balance_claim(peer, message)
+                    continue
+                
+                if message.type == MessageType.BALANCE_ACK:
+                    await self._handle_balance_ack(peer, message)
+                    continue
+                
                 # Обрабатываем сообщение
                 context: Dict[str, Any] = {
                     "peer": peer,
                     "peer_manager": self.peer_manager,
+                    "ledger": self.ledger,
                 }
                 
                 response = await self.router.route(message, self.crypto, context)
                 
                 # Отправляем ответ если есть
                 if response:
-                    await peer.send(response, self.use_masking)
+                    if self.ledger:
+                        # Используем send_with_accounting для учета отправки
+                        await peer.send_with_accounting(response, self.ledger, self.use_masking)
+                    else:
+                        await peer.send(response, self.use_masking)
                 
                 # Обрабатываем discovered peers
                 if "discovered_peers" in context:
@@ -534,6 +694,72 @@ class Node:
             # Уведомляем об отключении
             for callback in self._on_peer_disconnected:
                 await callback(peer)
+    
+    async def _handle_balance_claim(self, peer: Peer, message: Message) -> None:
+        """
+        Обработать BALANCE_CLAIM от пира.
+        
+        [ECONOMY] Пир сообщает нам свое видение баланса.
+        Сравниваем с нашим и решаем что делать.
+        """
+        if not self.crypto.verify_signature(message):
+            logger.warning(f"[NODE] Invalid signature on BALANCE_CLAIM from {peer.node_id[:8]}...")
+            return
+        
+        peer_claimed = message.payload.get("claimed_balance", 0)
+        peer.remote_balance_claim = peer_claimed
+        
+        logger.debug(
+            f"[NODE] Received balance claim from {peer.node_id[:8]}...: "
+            f"{peer_claimed:.0f} bytes"
+        )
+        
+        if self.ledger:
+            # Согласовываем баланс
+            result = await self.ledger.reconcile_balance(peer.node_id, peer_claimed)
+            
+            if result["status"] == "disputed":
+                logger.warning(
+                    f"[NODE] Balance dispute with {peer.node_id[:8]}...: "
+                    f"ours={result['our_balance']:.0f}, theirs={peer_claimed:.0f}"
+                )
+            
+            # Отправляем подтверждение с нашим балансом
+            our_balance = await self.ledger.get_balance(peer.node_id)
+            ack = Message(
+                type=MessageType.BALANCE_ACK,
+                payload={
+                    "acknowledged": True,
+                    "our_balance": our_balance,
+                    "peer_claimed": peer_claimed,
+                    "status": result["status"],
+                },
+                sender_id=self.node_id,
+            )
+            signed = self.crypto.sign_message(ack)
+            await peer.send(signed, self.use_masking)
+    
+    async def _handle_balance_ack(self, peer: Peer, message: Message) -> None:
+        """
+        Обработать BALANCE_ACK от пира.
+        
+        [ECONOMY] Пир подтверждает получение нашего BALANCE_CLAIM
+        и сообщает свое видение баланса.
+        """
+        if not self.crypto.verify_signature(message):
+            return
+        
+        their_balance = message.payload.get("our_balance", 0)
+        status = message.payload.get("status", "unknown")
+        
+        logger.debug(
+            f"[NODE] Balance ACK from {peer.node_id[:8]}...: "
+            f"their_view={their_balance:.0f}, status={status}"
+        )
+        
+        # Уведомляем callbacks
+        for callback in self._on_balance_received:
+            await callback(peer.node_id, their_balance)
     
     async def _heartbeat_loop(self) -> None:
         """
@@ -582,12 +808,16 @@ class Node:
                 for info in candidates:
                     await self.connect_to_peer(info.host, info.port)
     
-    async def broadcast(self, message: Message) -> int:
+    async def broadcast(self, message: Message, with_accounting: bool = True) -> int:
         """
         Отправить сообщение всем подключенным пирам.
         
         [DECENTRALIZATION] Broadcast используется для распространения
         информации по сети. Каждый узел пересылает сообщение своим пирам.
+        
+        [ECONOMY] Если with_accounting=True и есть ledger:
+        - Учитывает отправку в ledger
+        - Пропускает заблокированных пиров
         
         Returns:
             Количество успешных отправок
@@ -596,15 +826,33 @@ class Node:
         signed = self.crypto.sign_message(message)
         
         count = 0
+        blocked_count = 0
+        
         for peer in self.peer_manager.get_active_peers():
-            if await peer.send(signed, self.use_masking):
-                count += 1
+            if with_accounting and self.ledger:
+                success, _, reason = await peer.send_with_accounting(
+                    signed, self.ledger, self.use_masking
+                )
+                if success:
+                    count += 1
+                elif "blocked" in reason.lower():
+                    blocked_count += 1
+            else:
+                if await peer.send(signed, self.use_masking):
+                    count += 1
+        
+        if blocked_count > 0:
+            logger.info(f"[NODE] Broadcast skipped {blocked_count} blocked peers")
         
         return count
     
-    async def send_to(self, node_id: str, message: Message) -> bool:
+    async def send_to(self, node_id: str, message: Message, with_accounting: bool = True) -> bool:
         """
         Отправить сообщение конкретному пиру.
+        
+        [ECONOMY] Если with_accounting=True и есть ledger:
+        - Проверяет блокировку
+        - Учитывает отправку
         
         Returns:
             True если сообщение отправлено
@@ -614,7 +862,14 @@ class Node:
             return False
         
         signed = self.crypto.sign_message(message)
-        return await peer.send(signed, self.use_masking)
+        
+        if with_accounting and self.ledger:
+            success, _, _ = await peer.send_with_accounting(
+                signed, self.ledger, self.use_masking
+            )
+            return success
+        else:
+            return await peer.send(signed, self.use_masking)
     
     def on_peer_connected(self, callback: Callable[[Peer], Awaitable[None]]) -> None:
         """Зарегистрировать callback на подключение пира."""
@@ -627,6 +882,23 @@ class Node:
     def on_message(self, callback: Callable[[Message, Peer], Awaitable[None]]) -> None:
         """Зарегистрировать callback на входящее сообщение."""
         self._on_message.append(callback)
+    
+    def on_balance_received(self, callback: Callable[[str, float], Awaitable[None]]) -> None:
+        """
+        Зарегистрировать callback на получение баланса от пира.
+        
+        [ECONOMY] Callback вызывается когда пир сообщает свое видение баланса.
+        Args передаваемые в callback: (peer_node_id, their_balance_view)
+        """
+        self._on_balance_received.append(callback)
+    
+    def set_ledger(self, ledger: "Ledger") -> None:
+        """
+        Установить Ledger для учета трафика.
+        
+        [ECONOMY] Можно установить ledger после создания Node.
+        """
+        self.ledger = ledger
 
 
 class UDPDiscovery:
