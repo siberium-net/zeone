@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  node-a:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - NODE_NAME=Alpha
+    volumes:
+      - ./data/node_a:/app/data
+    stdin_open: true # Для интерактивного режима (если нужно)
+    tty: true
+
+  node-b:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - NODE_NAME=Beta
+    volumes:
+      - ./data/node_b:/app/data
+    command: python main.py --port 8001 --bootstrap node-a:8000
+    depends_on:
+      - node-a
+
