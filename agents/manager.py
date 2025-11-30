@@ -425,6 +425,20 @@ class AgentManager:
             self.register_agent(ReaderAgent())
         except ImportError as e:
             logger.warning(f"[AGENTS] ReaderAgent not available: {e}")
+        
+        # Cloud LLM Agent - облачный AI (OpenAI-compatible)
+        try:
+            from .ai_assistant import LlmAgent
+            self.register_agent(LlmAgent())
+        except ImportError as e:
+            logger.warning(f"[AGENTS] LlmAgent not available: {e}")
+        
+        # Local LLM Agent - локальный AI (Ollama/GPU)
+        try:
+            from .local_llm import OllamaAgent
+            self.register_agent(OllamaAgent())
+        except ImportError as e:
+            logger.warning(f"[AGENTS] OllamaAgent not available: {e}")
     
     def register_agent(self, agent: BaseAgent) -> None:
         """

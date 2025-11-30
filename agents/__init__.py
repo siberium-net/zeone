@@ -6,6 +6,8 @@ Agents Module (Layer 3: Market)
 - AgentManager: реестр и обработка запросов
 - EchoAgent: тестовый сервис для биллинга
 - ReaderAgent: чтение веб-страниц
+- LlmAgent: облачный LLM (OpenAI-compatible)
+- OllamaAgent: локальный LLM (Ollama/GPU)
 
 Sandbox:
 - Contract: исполняемый код в песочнице
@@ -33,6 +35,22 @@ except ImportError:
     ReaderAgent = None  # type: ignore
     _READER_AVAILABLE = False
 
+# LlmAgent (облачный) - требует aiohttp
+try:
+    from .ai_assistant import LlmAgent
+    _LLM_AVAILABLE = True
+except ImportError:
+    LlmAgent = None  # type: ignore
+    _LLM_AVAILABLE = False
+
+# OllamaAgent (локальный GPU) - требует aiohttp
+try:
+    from .local_llm import OllamaAgent
+    _OLLAMA_AVAILABLE = True
+except ImportError:
+    OllamaAgent = None  # type: ignore
+    _OLLAMA_AVAILABLE = False
+
 __all__ = [
     "AgentManager",
     "BaseAgent",
@@ -40,6 +58,8 @@ __all__ = [
     "StorageAgent",
     "ComputeAgent",
     "ReaderAgent",
+    "LlmAgent",
+    "OllamaAgent",
     "ServiceRequest",
     "ServiceResponse",
     "Contract",

@@ -41,6 +41,13 @@ import sys
 from pathlib import Path
 from typing import List, Tuple, Optional
 
+# Загрузка переменных окружения из .env файла
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv не установлен
+
 from config import config
 from core.node import Node
 from core.transport import Crypto, Message, MessageType
@@ -153,6 +160,11 @@ Available commands:
   services          - List available services on this node
   echo <peer_id> <text>  - Send Echo request to peer (test billing)
   request <peer_id> <service> <data> <budget> - Send service request
+  
+[AI] LLM commands:
+  ask <prompt>           - Ask local Ollama (llm_local service)
+  ask <peer_id> <prompt> - Ask peer's LLM service
+  models                 - List available Ollama models (local)
   
 Other:
   id                - Show this node's ID
@@ -419,6 +431,96 @@ Ledger Statistics:
                     print(f"[OK] Service request sent: {service_name}")
                 else:
                     print(f"[ERROR] Failed to send request")
+            
+            # [AI] LLM commands
+            elif cmd == "ask":
+                # ask <prompt> - локальный запрос к Ollama
+                # ask <peer_id> <prompt> - запрос к пиру
+                if not args:
+                    print("[ERROR] Usage: ask <prompt> OR ask <peer_id> <prompt>")
+                    continue
+                
+                parts = args.split(maxsplit=1)
+                
+                # Проверяем, похоже ли первое слово на peer_id
+                potential_peer = parts[0]
+                is_peer_id = False
+                target_peer = None
+                
+                if len(potential_peer) >= 8:  # Минимум 8 символов для ID
+                    for peer in node.peer_manager.get_active_peers():
+                        if peer.node_id.startswith(potential_peer) or peer.node_id[:16].startswith(potential_peer):
+                            is_peer_id = True
+                            target_peer = peer
+                            break
+                
+                if is_peer_id and target_peer and len(parts) > 1:
+                    # Запрос к пиру
+                    prompt = parts[1]
+                    print(f"[AI] Sending prompt to peer {target_peer.node_id[:16]}...")
+                    print(f"     Prompt: '{prompt[:50]}...' ({len(prompt)} chars)")
+                    
+                    success = await node.request_service(
+                        target_peer.node_id,
+                        "llm_local",  # Или "llm_prompt" для облачного
+                        {"prompt": prompt},
+                        50,  # Бюджет
+                    )
+                    
+                    if success:
+                        print("[OK] LLM request sent, waiting for response...")
+                    else:
+                        print("[ERROR] Failed to send LLM request")
+                else:
+                    # Локальный запрос к Ollama
+                    prompt = args
+                    
+                    # Проверяем, есть ли OllamaAgent
+                    ollama_agent = agent_manager._agents.get("llm_local")
+                    if not ollama_agent:
+                        print("[ERROR] OllamaAgent not available on this node")
+                        continue
+                    
+                    print(f"[AI] Asking local Ollama...")
+                    print(f"     Prompt: '{prompt[:50]}{'...' if len(prompt) > 50 else ''}'")
+                    
+                    try:
+                        result, units = await ollama_agent.execute({"prompt": prompt})
+                        
+                        if "error" in result:
+                            print(f"[ERROR] Ollama: {result['error']}")
+                        else:
+                            response = result.get("response", "")
+                            model = result.get("model", "unknown")
+                            eval_count = result.get("eval_count", 0)
+                            
+                            print(f"\n[AI Response] ({model}, {eval_count} tokens)")
+                            print("-" * 40)
+                            print(response)
+                            print("-" * 40)
+                            print(f"Cost: {units * ollama_agent.price_per_unit:.1f} units")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+            
+            elif cmd == "models":
+                # Показать доступные модели Ollama
+                ollama_agent = agent_manager._agents.get("llm_local")
+                if not ollama_agent:
+                    print("[ERROR] OllamaAgent not available on this node")
+                    continue
+                
+                print("[AI] Checking Ollama models...")
+                try:
+                    models = await ollama_agent.list_models()
+                    if models:
+                        print(f"[OK] Available models ({len(models)}):")
+                        for m in models:
+                            default_marker = " [DEFAULT]" if m == ollama_agent.model_name else ""
+                            print(f"  - {m}{default_marker}")
+                    else:
+                        print("[WARN] No models found or Ollama offline")
+                except Exception as e:
+                    print(f"[ERROR] {e}")
             
             else:
                 print(f"[ERROR] Unknown command: {cmd}. Type 'help' for commands.")
