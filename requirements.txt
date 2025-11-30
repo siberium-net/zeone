@@ -10,3 +10,7 @@ aiosqlite>=0.19.0
 # Sandbox for executing untrusted code
 RestrictedPython>=6.0
 
+# Web reading agent dependencies
+aiohttp>=3.9.0
+beautifulsoup4>=4.12.0
+

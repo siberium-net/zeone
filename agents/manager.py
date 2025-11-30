@@ -418,6 +418,13 @@ class AgentManager:
         self.register_agent(EchoAgent())
         self.register_agent(StorageAgent())
         self.register_agent(ComputeAgent())
+        
+        # Web Reader Agent - скачивание и парсинг веб-страниц
+        try:
+            from .web_reader import ReaderAgent
+            self.register_agent(ReaderAgent())
+        except ImportError as e:
+            logger.warning(f"[AGENTS] ReaderAgent not available: {e}")
     
     def register_agent(self, agent: BaseAgent) -> None:
         """
