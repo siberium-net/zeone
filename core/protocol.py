@@ -1,0 +1,419 @@
+"""
+Protocol Layer - Обработчики сообщений и Ping-Pong протокол
+==========================================================
+
+[SECURITY] Этот модуль реализует:
+1. Ping-Pong протокол с верификацией подписей
+2. Discovery протокол для поиска пиров
+3. Базовые обработчики сообщений
+
+[DECENTRALIZATION] Все сообщения верифицируются криптографически.
+PONG возвращается ТОЛЬКО если подпись PING валидна.
+Это защищает от спуфинга и replay-атак.
+"""
+
+import time
+import os
+import base64
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List, Callable, Awaitable, Any, TYPE_CHECKING
+from abc import ABC, abstractmethod
+
+from .transport import Message, MessageType, Crypto
+
+if TYPE_CHECKING:
+    from .node import Peer
+
+
+@dataclass
+class PeerInfo:
+    """Информация о пире для Discovery."""
+    
+    node_id: str
+    host: str
+    port: int
+    trust_score: float = 0.5
+    last_seen: float = field(default_factory=time.time)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "host": self.host,
+            "port": self.port,
+            "trust_score": self.trust_score,
+            "last_seen": self.last_seen,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PeerInfo":
+        return cls(
+            node_id=data["node_id"],
+            host=data["host"],
+            port=data["port"],
+            trust_score=data.get("trust_score", 0.5),
+            last_seen=data.get("last_seen", time.time()),
+        )
+
+
+class MessageHandler(ABC):
+    """
+    Базовый класс для обработчиков сообщений.
+    
+    [DECENTRALIZATION] Каждый тип сообщения обрабатывается
+    независимо. Узел может выбирать, какие обработчики
+    использовать.
+    """
+    
+    @property
+    @abstractmethod
+    def message_type(self) -> MessageType:
+        """Тип сообщения, который обрабатывает этот handler."""
+        pass
+    
+    @abstractmethod
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """
+        Обработать входящее сообщение.
+        
+        Args:
+            message: Входящее сообщение
+            crypto: Криптомодуль узла
+            context: Контекст (peer info, etc.)
+        
+        Returns:
+            Ответное сообщение или None
+        """
+        pass
+
+
+class PingPongHandler(MessageHandler):
+    """
+    Обработчик Ping-Pong протокола.
+    
+    [SECURITY] Протокол проверки связи с верификацией:
+    
+    1. Узел A отправляет PING:
+       - nonce: случайное значение
+       - timestamp: время отправки
+       - signature: подпись (nonce + timestamp + sender_id)
+    
+    2. Узел B проверяет:
+       - Подпись валидна
+       - timestamp не слишком старый (защита от replay)
+       - sender_id соответствует подписи
+    
+    3. Если все проверки пройдены, узел B отправляет PONG:
+       - original_nonce: nonce из PING
+       - timestamp: текущее время
+       - signature: подпись ответа
+    
+    [DECENTRALIZATION] Этот протокол позволяет узлам:
+    - Проверить, что пир владеет заявленным приватным ключом
+    - Измерить latency соединения
+    - Обнаружить "мертвые" узлы
+    """
+    
+    # Максимальный возраст PING сообщения (секунды)
+    MAX_PING_AGE = 60.0
+    
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.PING
+    
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """
+        Обработать PING и вернуть PONG если подпись валидна.
+        
+        [SECURITY] PONG возвращается ТОЛЬКО если:
+        1. Подпись PING валидна
+        2. Timestamp не слишком старый
+        
+        Это предотвращает:
+        - Спуфинг (подделка отправителя)
+        - Replay-атаки (повторная отправка старых сообщений)
+        """
+        # Проверка 1: Валидность подписи
+        if not crypto.verify_signature(message):
+            # [SECURITY] Отклоняем сообщение с невалидной подписью
+            # Не отправляем ответ - это может быть попытка атаки
+            return None
+        
+        # Проверка 2: Возраст сообщения
+        age = time.time() - message.timestamp
+        if age > self.MAX_PING_AGE:
+            # [SECURITY] Сообщение слишком старое
+            # Возможная replay-атака
+            return None
+        
+        # Все проверки пройдены - создаем PONG
+        pong = Message(
+            type=MessageType.PONG,
+            payload={
+                "original_nonce": message.nonce,
+                "ping_timestamp": message.timestamp,
+            },
+            sender_id=crypto.node_id,
+        )
+        
+        # Подписываем ответ
+        return crypto.sign_message(pong)
+    
+    @staticmethod
+    def create_ping(crypto: Crypto) -> Message:
+        """
+        Создать PING сообщение.
+        
+        [SECURITY] PING содержит:
+        - nonce: уникальное случайное значение
+        - timestamp: текущее время
+        - подпись: доказательство владения ключом
+        """
+        ping = Message(
+            type=MessageType.PING,
+            payload={},
+            sender_id=crypto.node_id,
+            nonce=base64.b64encode(os.urandom(16)).decode("ascii"),
+        )
+        return crypto.sign_message(ping)
+    
+    @staticmethod
+    def verify_pong(ping: Message, pong: Message, crypto: Crypto) -> bool:
+        """
+        Проверить что PONG соответствует нашему PING.
+        
+        [SECURITY] Проверяем:
+        1. Подпись PONG валидна
+        2. original_nonce совпадает с nonce из PING
+        """
+        # Проверяем подпись
+        if not crypto.verify_signature(pong):
+            return False
+        
+        # Проверяем nonce
+        if pong.payload.get("original_nonce") != ping.nonce:
+            return False
+        
+        return True
+
+
+class PongHandler(MessageHandler):
+    """Обработчик PONG сообщений (для логирования и обновления RTT)."""
+    
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.PONG
+    
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """
+        Обработать PONG.
+        
+        PONG не требует ответа, но мы можем:
+        - Обновить RTT для пира
+        - Подтвердить что пир жив
+        """
+        # Проверяем подпись
+        if not crypto.verify_signature(message):
+            return None
+        
+        # Обновляем информацию о пире в контексте
+        if "peer" in context:
+            peer = context["peer"]
+            ping_timestamp = message.payload.get("ping_timestamp", 0)
+            if ping_timestamp:
+                rtt = time.time() - ping_timestamp
+                # RTT можно использовать для оценки качества соединения
+                context.setdefault("rtt_history", []).append(rtt)
+        
+        return None
+
+
+class DiscoverHandler(MessageHandler):
+    """
+    Обработчик Discovery протокола.
+    
+    [DECENTRALIZATION] Discovery позволяет узлам находить друг друга
+    без центрального реестра:
+    
+    1. Новый узел подключается к bootstrap-узлу
+    2. Отправляет DISCOVER запрос
+    3. Получает PEER_LIST со списком известных пиров
+    4. Подключается к некоторым из них
+    5. Повторяет процесс для расширения сети
+    
+    Это создает mesh-топологию где каждый узел знает о части сети.
+    """
+    
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.DISCOVER
+    
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """
+        Обработать DISCOVER запрос.
+        
+        Возвращает список известных пиров.
+        """
+        # Проверяем подпись
+        if not crypto.verify_signature(message):
+            return None
+        
+        # Получаем список пиров из контекста
+        peer_manager = context.get("peer_manager")
+        if not peer_manager:
+            return None
+        
+        # Собираем информацию о пирах
+        peers_info = []
+        for peer in peer_manager.get_active_peers():
+            peers_info.append(PeerInfo(
+                node_id=peer.node_id,
+                host=peer.host,
+                port=peer.port,
+                trust_score=peer.trust_score,
+            ).to_dict())
+        
+        # Создаем ответ
+        response = Message(
+            type=MessageType.PEER_LIST,
+            payload={
+                "peers": peers_info,
+                "total_known": len(peers_info),
+            },
+            sender_id=crypto.node_id,
+        )
+        
+        return crypto.sign_message(response)
+    
+    @staticmethod
+    def create_discover(crypto: Crypto) -> Message:
+        """Создать DISCOVER запрос."""
+        discover = Message(
+            type=MessageType.DISCOVER,
+            payload={
+                "max_peers": 20,  # Максимум пиров в ответе
+            },
+            sender_id=crypto.node_id,
+        )
+        return crypto.sign_message(discover)
+
+
+class PeerListHandler(MessageHandler):
+    """Обработчик PEER_LIST сообщений."""
+    
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.PEER_LIST
+    
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """
+        Обработать PEER_LIST.
+        
+        Добавляет новых пиров в список для подключения.
+        """
+        if not crypto.verify_signature(message):
+            return None
+        
+        # Извлекаем информацию о пирах
+        peers_data = message.payload.get("peers", [])
+        new_peers = [PeerInfo.from_dict(p) for p in peers_data]
+        
+        # Сохраняем в контексте для дальнейшей обработки
+        context["discovered_peers"] = new_peers
+        
+        return None
+
+
+class DataHandler(MessageHandler):
+    """
+    Обработчик DATA сообщений.
+    
+    [DECENTRALIZATION] DATA сообщения могут содержать
+    произвольные данные для передачи между узлами.
+    """
+    
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.DATA
+    
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """Обработать DATA сообщение."""
+        if not crypto.verify_signature(message):
+            return None
+        
+        # Данные передаются callback-у в контексте
+        data_callback = context.get("on_data")
+        if data_callback:
+            await data_callback(message.payload, message.sender_id)
+        
+        return None
+
+
+class ProtocolRouter:
+    """
+    Маршрутизатор протокола.
+    
+    Направляет входящие сообщения соответствующим обработчикам.
+    """
+    
+    def __init__(self):
+        self.handlers: Dict[MessageType, MessageHandler] = {}
+        
+        # Регистрируем стандартные обработчики
+        self.register(PingPongHandler())
+        self.register(PongHandler())
+        self.register(DiscoverHandler())
+        self.register(PeerListHandler())
+        self.register(DataHandler())
+    
+    def register(self, handler: MessageHandler) -> None:
+        """Зарегистрировать обработчик."""
+        self.handlers[handler.message_type] = handler
+    
+    async def route(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        """
+        Маршрутизировать сообщение к обработчику.
+        
+        Returns:
+            Ответное сообщение или None
+        """
+        handler = self.handlers.get(message.type)
+        if not handler:
+            return None
+        
+        return await handler.handle(message, crypto, context)
+
