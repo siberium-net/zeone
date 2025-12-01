@@ -126,8 +126,8 @@ class P2PWebUI:
                 self._status_badge = ui.badge('Offline', color='red')
                 
                 # Переключатель темы
-                ui.dark_mode().bind_value_to(app.storage.user, 'dark_mode')
-                ui.switch('Dark').bind_value(app.storage.user, 'dark_mode')
+                dark = ui.dark_mode(value=self.dark_mode)
+                ui.switch('Dark', on_change=lambda e: dark.set_value(e.value))
     
     async def _create_sidebar(self) -> None:
         """Создать боковое меню."""
@@ -1086,9 +1086,11 @@ class P2PWebUI:
         self._create_settings_page()
         self._create_logs_page()
     
-    async def start(self, host: str = "0.0.0.0", port: int = 8080) -> None:
+    def run_sync(self, host: str = "0.0.0.0", port: int = 8080) -> None:
         """
-        Запустить Web UI.
+        Запустить Web UI синхронно (блокирующий вызов).
+        
+        Используется как основная точка входа.
         
         Args:
             host: Адрес для прослушивания
@@ -1104,12 +1106,9 @@ class P2PWebUI:
         # Setup pages
         self.setup_pages()
         
-        # Configure
-        app.storage.user['dark_mode'] = self.dark_mode
-        
         logger.info(f"[WEBUI] Starting on http://{host}:{port}")
         
-        # Run NiceGUI
+        # Run NiceGUI (блокирующий вызов)
         ui.run(
             host=host,
             port=port,
@@ -1117,7 +1116,52 @@ class P2PWebUI:
             dark=self.dark_mode,
             reload=False,
             show=False,
+            storage_secret="p2p_node_secret_key_change_in_production",
         )
+    
+    async def start(self, host: str = "0.0.0.0", port: int = 8080) -> None:
+        """
+        Запустить Web UI в отдельном потоке (для использования из async контекста).
+        
+        Args:
+            host: Адрес для прослушивания
+            port: Порт
+        """
+        if not NICEGUI_AVAILABLE:
+            logger.error("[WEBUI] NiceGUI not installed. Run: pip install nicegui")
+            return
+        
+        import threading
+        
+        self._running = True
+        self._update_state()
+        
+        # Setup pages
+        self.setup_pages()
+        
+        logger.info(f"[WEBUI] Starting on http://{host}:{port}")
+        
+        # Запускаем NiceGUI в отдельном потоке
+        def run_ui():
+            ui.run(
+                host=host,
+                port=port,
+                title=self.title,
+                dark=self.dark_mode,
+                reload=False,
+                show=False,
+                storage_secret="p2p_node_secret_key_change_in_production",
+            )
+        
+        ui_thread = threading.Thread(target=run_ui, daemon=True)
+        ui_thread.start()
+        
+        # Ждём пока не остановят
+        try:
+            while self._running:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
 
 
 def create_webui(
