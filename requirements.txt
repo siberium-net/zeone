@@ -22,6 +22,9 @@ colorama
 # Async SQLite for ledger
 aiosqlite
 
+# Async file operations
+aiofiles
+
 # Sandbox for contracts (optional)
 RestrictedPython
 
@@ -36,3 +39,6 @@ numpy>=1.24.0
 
 # Web UI
 nicegui>=1.4.0
+
+# [PRODUCTION] System monitoring
+psutil>=5.9.0

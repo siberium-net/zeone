@@ -86,6 +86,60 @@ class AgentConfig:
 
 
 @dataclass
+class PersistenceConfig:
+    """[PRODUCTION] Настройки persistence."""
+    
+    # Путь к базе состояния
+    state_db_path: str = "node_state.db"
+    
+    # Интервал автосохранения (секунды)
+    auto_save_interval: float = 60.0
+    
+    # Время жизни неактивных пиров (секунды)
+    peer_stale_threshold: float = 3600.0
+    
+    # Максимум пиров в кэше
+    max_cached_peers: int = 1000
+
+
+@dataclass
+class SecurityConfig:
+    """[PRODUCTION] Настройки безопасности."""
+    
+    # Rate Limiting
+    rate_limit_messages_per_sec: float = 20.0
+    rate_limit_connections_per_min: int = 10
+    rate_limit_burst_size: int = 100
+    
+    # DoS Protection
+    dos_max_bandwidth_per_sec: int = 1_000_000  # 1 MB/s
+    dos_max_invalid_ratio: float = 0.3
+    dos_temp_ban_duration: float = 300.0  # 5 min
+    dos_perm_ban_threshold: int = 5
+    
+    # Whitelist (node_ids)
+    whitelist: List[str] = field(default_factory=list)
+
+
+@dataclass
+class MonitoringConfig:
+    """[PRODUCTION] Настройки мониторинга."""
+    
+    # Health Checks
+    health_check_interval: float = 30.0
+    health_check_timeout: float = 5.0
+    unhealthy_threshold: int = 3
+    
+    # Metrics
+    metrics_prefix: str = "p2p"
+    metrics_export_interval: float = 60.0
+    
+    # HTTP endpoint для health/metrics
+    http_port: int = 8080
+    http_enabled: bool = False
+
+
+@dataclass
 class Config:
     """Главный конфигурационный класс."""
     
@@ -93,6 +147,9 @@ class Config:
     crypto: CryptoConfig = field(default_factory=CryptoConfig)
     ledger: LedgerConfig = field(default_factory=LedgerConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
+    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
 
 
 # Глобальный экземпляр конфигурации
