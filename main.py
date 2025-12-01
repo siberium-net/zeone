@@ -177,6 +177,13 @@ Available commands:
   dht del <key>          - Delete data from local DHT storage
   dht info               - Show DHT statistics
   routing                - Show routing table info
+
+[NAT] NAT Traversal:
+  nat info               - Show NAT type and public address
+  nat candidates         - Show local ICE candidates
+  nat relay start        - Start P2P relay server (if public IP)
+  nat relay stop         - Stop relay server
+  nat connect <peer_id>  - Connect to peer using ICE
   
 Other:
   id                - Show this node's ID
@@ -639,6 +646,186 @@ Ledger Statistics:
   Bucket sizes (first 10 non-empty):
     {stats['bucket_sizes']}
 """)
+            
+            # [NAT] NAT Traversal commands
+            elif cmd == "nat":
+                if not args:
+                    print("[ERROR] Usage: nat <info|candidates|relay|connect> [args]")
+                    continue
+                
+                parts = args.split(maxsplit=1)
+                subcmd = parts[0].lower()
+                subargs = parts[1] if len(parts) > 1 else ""
+                
+                if subcmd == "info":
+                    # Показать информацию о NAT
+                    print("[NAT] Detecting NAT type...")
+                    try:
+                        from core.nat import STUNClient
+                        stun = STUNClient()
+                        mapped = await stun.get_mapped_address(node.port)
+                        
+                        if mapped:
+                            nat_type = await stun.detect_nat_type(node.port)
+                            print(f"""
+[NAT] Information:
+  Local address: {mapped.local_ip}:{mapped.local_port}
+  Public address: {mapped.ip}:{mapped.port}
+  NAT type: {nat_type.name}
+  Is public: {mapped.is_public}
+""")
+                        else:
+                            print("[WARN] Could not determine public address")
+                            print("       STUN servers may be unreachable")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                elif subcmd == "candidates":
+                    # Показать ICE candidates
+                    print("[NAT] Gathering ICE candidates...")
+                    try:
+                        from core.nat import CandidateGatherer
+                        gatherer = CandidateGatherer(node.port)
+                        candidates = await gatherer.gather()
+                        
+                        print(f"\n[NAT] ICE Candidates ({len(candidates)}):")
+                        for c in candidates:
+                            pub = "[PUBLIC]" if c.is_public else "[PRIVATE]"
+                            print(f"  {c.type.value:6} {c.transport.value:3} {c.ip}:{c.port} {pub}")
+                        
+                        # Публикуем в DHT если доступен
+                        if kademlia and candidates:
+                            candidates_data = [c.to_dict() for c in candidates]
+                            import json
+                            await kademlia.dht_put(
+                                f"ice:{node.node_id[:32]}",
+                                json.dumps(candidates_data).encode()
+                            )
+                            print(f"\n[OK] Published candidates to DHT")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                elif subcmd == "relay":
+                    # Управление relay сервером
+                    relay_cmd = subargs.lower() if subargs else "status"
+                    
+                    if relay_cmd == "start":
+                        if hasattr(node, '_relay_server') and node._relay_server:
+                            print("[WARN] Relay server already running")
+                        else:
+                            try:
+                                from core.nat import RelayServer
+                                relay = RelayServer(
+                                    host="0.0.0.0",
+                                    port=node.port + 1,
+                                    node_id=node.node_id,
+                                )
+                                await relay.start()
+                                node._relay_server = relay
+                                
+                                print(f"[OK] Relay server started on port {node.port + 1}")
+                                
+                                # Публикуем в DHT
+                                if kademlia:
+                                    from core.nat import STUNClient
+                                    stun = STUNClient()
+                                    mapped = await stun.get_mapped_address(node.port + 1)
+                                    if mapped and mapped.is_public:
+                                        import json
+                                        relay_info = {
+                                            "node_id": node.node_id,
+                                            "ip": mapped.ip,
+                                            "port": mapped.port,
+                                            "capacity": relay.available_slots,
+                                        }
+                                        await kademlia.dht_put(
+                                            f"relay:{node.node_id[:16]}",
+                                            json.dumps(relay_info).encode()
+                                        )
+                                        print(f"[OK] Published relay to DHT: {mapped.ip}:{mapped.port}")
+                            except Exception as e:
+                                print(f"[ERROR] {e}")
+                    
+                    elif relay_cmd == "stop":
+                        if hasattr(node, '_relay_server') and node._relay_server:
+                            await node._relay_server.stop()
+                            node._relay_server = None
+                            print("[OK] Relay server stopped")
+                        else:
+                            print("[WARN] Relay server not running")
+                    
+                    else:  # status
+                        if hasattr(node, '_relay_server') and node._relay_server:
+                            stats = node._relay_server.get_stats()
+                            print(f"""
+[NAT] Relay Server:
+  Running: {stats['running']}
+  Port: {stats['port']}
+  Connected peers: {stats['connected_peers']}/{stats['max_peers']}
+  Total relayed: {stats['total_bytes_relayed']} bytes
+""")
+                        else:
+                            print("[NAT] Relay server not running")
+                
+                elif subcmd == "connect":
+                    # Подключиться к пиру через ICE
+                    if not subargs:
+                        print("[ERROR] Usage: nat connect <peer_id_prefix>")
+                        continue
+                    
+                    peer_prefix = subargs
+                    
+                    # Ищем peer в DHT
+                    if not kademlia:
+                        print("[ERROR] DHT not available for peer lookup")
+                        continue
+                    
+                    print(f"[NAT] Looking up ICE candidates for {peer_prefix}...")
+                    
+                    # Пробуем найти candidates в DHT
+                    import json
+                    candidates_raw = await kademlia.dht_get(f"ice:{peer_prefix}")
+                    
+                    if not candidates_raw:
+                        print(f"[ERROR] No ICE candidates found for {peer_prefix}")
+                        continue
+                    
+                    try:
+                        remote_candidates_data = json.loads(candidates_raw.decode())
+                        from core.nat import Candidate, ICEAgent
+                        
+                        remote_candidates = [
+                            Candidate.from_dict(c) for c in remote_candidates_data
+                        ]
+                        
+                        print(f"[NAT] Found {len(remote_candidates)} remote candidates")
+                        
+                        # Создаём ICE agent и подключаемся
+                        ice = ICEAgent(
+                            node_id=node.node_id,
+                            local_port=node.port,
+                        )
+                        
+                        print("[NAT] Establishing ICE connection...")
+                        connection = await ice.connect(remote_candidates, peer_prefix)
+                        
+                        if connection:
+                            print(f"""
+[OK] ICE Connection established!
+  Type: {connection.connection_type}
+  Local: {connection.local_candidate.ip}:{connection.local_candidate.port}
+  Remote: {connection.remote_candidate.ip}:{connection.remote_candidate.port}
+  Latency: {connection.latency_ms:.1f}ms
+""")
+                        else:
+                            print("[ERROR] Failed to establish ICE connection")
+                            print("        Try: nat relay start (on a node with public IP)")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                else:
+                    print(f"[ERROR] Unknown NAT command: {subcmd}")
+                    print("  Available: info, candidates, relay, connect")
             
             else:
                 print(f"[ERROR] Unknown command: {cmd}. Type 'help' for commands.")
