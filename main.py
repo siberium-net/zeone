@@ -19,8 +19,14 @@ P2P Network Node - Точка входа (Layer 3: Market)
 - Обработка SERVICE_REQUEST от других узлов
 - Биллинг через Ledger
 
+[WEBUI] Web Interface:
+- Dashboard, Peers, Services, AI, DHT, Economy
+- Real-time updates
+- Modern UI
+
 Использование:
     python main.py [--port PORT] [--bootstrap HOST:PORT] [--identity FILE]
+    python main.py --webui  # Запуск с Web UI
 
 Примеры:
     # Запуск первого узла (bootstrap)
@@ -29,7 +35,10 @@ P2P Network Node - Точка входа (Layer 3: Market)
     # Подключение к существующему узлу
     python main.py --port 8469 --bootstrap 127.0.0.1:8468
     
-    # Тест Echo сервиса
+    # Запуск с Web UI
+    python main.py --port 8468 --webui --webui-port 8080
+    
+    # Тест Echo сервиса (в консоли)
     >>> echo Hello World
 """
 
@@ -1079,6 +1088,17 @@ Examples:
         help="Disable interactive shell",
     )
     parser.add_argument(
+        "--webui", "-w",
+        action="store_true",
+        help="Enable Web UI (default port: 8080)",
+    )
+    parser.add_argument(
+        "--webui-port",
+        type=int,
+        default=8080,
+        help="Web UI port (default: 8080)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging",
@@ -1178,7 +1198,30 @@ Examples:
             pass
     
     try:
-        if args.no_shell:
+        if args.webui:
+            # Запуск Web UI
+            try:
+                from webui import create_webui
+                
+                webui = create_webui(
+                    node=node,
+                    ledger=ledger,
+                    agent_manager=agent_manager,
+                    kademlia=kademlia,
+                    title=f"P2P Node - {crypto.node_id[:16]}...",
+                )
+                
+                logger.info(f"[WEBUI] Starting on http://0.0.0.0:{args.webui_port}")
+                logger.info("[WEBUI] Interactive shell disabled when WebUI is active")
+                
+                # NiceGUI блокирует, поэтому shell недоступен
+                await webui.start(host="0.0.0.0", port=args.webui_port)
+                
+            except ImportError as e:
+                logger.error(f"[WEBUI] Failed to import: {e}")
+                logger.error("[WEBUI] Install with: pip install nicegui")
+                await interactive_shell(node, ledger, agent_manager, kademlia)
+        elif args.no_shell:
             logger.info("[MAIN] Running in daemon mode. Press Ctrl+C to stop.")
             await shutdown_event.wait()
         else:

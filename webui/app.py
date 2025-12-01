@@ -1,0 +1,1149 @@
+"""
+P2P Node Web UI - Главное приложение
+====================================
+
+[ARCHITECTURE]
+- NiceGUI для UI
+- Async интеграция с Node
+- WebSocket для real-time updates
+- Modular pages
+"""
+
+import asyncio
+import logging
+from typing import Optional, Dict, Any, Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+# Попытка импорта NiceGUI
+try:
+    from nicegui import ui, app, Client
+    NICEGUI_AVAILABLE = True
+except ImportError:
+    NICEGUI_AVAILABLE = False
+    logger.warning("[WEBUI] NiceGUI not installed. Run: pip install nicegui")
+
+
+@dataclass
+class NodeState:
+    """Состояние узла для отображения в UI."""
+    node_id: str = ""
+    host: str = "0.0.0.0"
+    port: int = 8468
+    is_running: bool = False
+    peers_count: int = 0
+    services: list = field(default_factory=list)
+    dht_available: bool = False
+    
+    # Статистика
+    total_sent: int = 0
+    total_received: int = 0
+    uptime_seconds: float = 0
+    
+    # Последнее обновление
+    last_update: float = 0
+
+
+class P2PWebUI:
+    """
+    Web UI для P2P узла.
+    
+    [USAGE]
+    ```python
+    webui = P2PWebUI(node, ledger, agent_manager)
+    await webui.start(port=8080)
+    ```
+    """
+    
+    def __init__(
+        self,
+        node=None,
+        ledger=None,
+        agent_manager=None,
+        kademlia=None,
+        title: str = "P2P Node",
+        dark_mode: bool = True,
+    ):
+        """
+        Args:
+            node: P2P Node instance
+            ledger: Ledger instance
+            agent_manager: AgentManager instance
+            kademlia: KademliaNode instance
+            title: Заголовок страницы
+            dark_mode: Тёмная тема
+        """
+        self.node = node
+        self.ledger = ledger
+        self.agent_manager = agent_manager
+        self.kademlia = kademlia
+        self.title = title
+        self.dark_mode = dark_mode
+        
+        self._state = NodeState()
+        self._update_interval = 2.0  # секунды
+        self._running = False
+        
+        # Callbacks для обновления UI
+        self._update_callbacks: list = []
+    
+    def _update_state(self) -> None:
+        """Обновить состояние из node."""
+        if not self.node:
+            return
+        
+        import time
+        
+        self._state.node_id = getattr(self.node, 'node_id', '')[:32]
+        self._state.host = getattr(self.node, 'host', '0.0.0.0')
+        self._state.port = getattr(self.node, 'port', 8468)
+        self._state.is_running = getattr(self.node, '_running', False)
+        
+        # Peers
+        peer_manager = getattr(self.node, 'peer_manager', None)
+        if peer_manager:
+            peers = peer_manager.get_active_peers()
+            self._state.peers_count = len(peers) if peers else 0
+        
+        # Services
+        if self.agent_manager:
+            self._state.services = list(self.agent_manager._agents.keys())
+        
+        # DHT
+        self._state.dht_available = self.kademlia is not None
+        
+        self._state.last_update = time.time()
+    
+    async def _create_header(self) -> None:
+        """Создать шапку страницы."""
+        with ui.header().classes('items-center justify-between'):
+            ui.label(self.title).classes('text-xl font-bold')
+            
+            with ui.row().classes('items-center gap-4'):
+                # Статус
+                self._status_badge = ui.badge('Offline', color='red')
+                
+                # Переключатель темы
+                ui.dark_mode().bind_value_to(app.storage.user, 'dark_mode')
+                ui.switch('Dark').bind_value(app.storage.user, 'dark_mode')
+    
+    async def _create_sidebar(self) -> None:
+        """Создать боковое меню."""
+        with ui.left_drawer(value=True).classes('bg-gray-100 dark:bg-gray-800'):
+            ui.label('Navigation').classes('text-lg font-bold p-4')
+            
+            with ui.column().classes('w-full'):
+                ui.button('Dashboard', icon='dashboard', on_click=lambda: ui.navigate.to('/')).classes('w-full justify-start')
+                ui.button('Peers', icon='people', on_click=lambda: ui.navigate.to('/peers')).classes('w-full justify-start')
+                ui.button('Services', icon='build', on_click=lambda: ui.navigate.to('/services')).classes('w-full justify-start')
+                ui.button('AI / LLM', icon='psychology', on_click=lambda: ui.navigate.to('/ai')).classes('w-full justify-start')
+                ui.button('DHT', icon='storage', on_click=lambda: ui.navigate.to('/dht')).classes('w-full justify-start')
+                ui.button('Economy', icon='account_balance', on_click=lambda: ui.navigate.to('/economy')).classes('w-full justify-start')
+                ui.button('Storage', icon='folder', on_click=lambda: ui.navigate.to('/storage')).classes('w-full justify-start')
+                ui.button('Compute', icon='memory', on_click=lambda: ui.navigate.to('/compute')).classes('w-full justify-start')
+                
+                ui.separator()
+                
+                ui.button('Settings', icon='settings', on_click=lambda: ui.navigate.to('/settings')).classes('w-full justify-start')
+                ui.button('Logs', icon='article', on_click=lambda: ui.navigate.to('/logs')).classes('w-full justify-start')
+    
+    def _create_dashboard_page(self) -> None:
+        """Dashboard страница."""
+        
+        @ui.page('/')
+        async def dashboard():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Dashboard').classes('text-2xl font-bold mb-4')
+                
+                # Карточки статистики
+                with ui.row().classes('w-full gap-4 flex-wrap'):
+                    # Node Info
+                    with ui.card().classes('w-64'):
+                        ui.label('Node').classes('text-lg font-bold')
+                        self._node_id_label = ui.label(f'ID: {self._state.node_id}...').classes('text-sm font-mono')
+                        self._node_addr_label = ui.label(f'{self._state.host}:{self._state.port}')
+                        self._node_status = ui.badge('Checking...', color='yellow')
+                    
+                    # Peers
+                    with ui.card().classes('w-64'):
+                        ui.label('Peers').classes('text-lg font-bold')
+                        self._peers_count_label = ui.label('0').classes('text-4xl font-bold text-blue-500')
+                        ui.label('connected').classes('text-sm text-gray-500')
+                    
+                    # Services
+                    with ui.card().classes('w-64'):
+                        ui.label('Services').classes('text-lg font-bold')
+                        self._services_count_label = ui.label('0').classes('text-4xl font-bold text-green-500')
+                        ui.label('available').classes('text-sm text-gray-500')
+                    
+                    # DHT
+                    with ui.card().classes('w-64'):
+                        ui.label('DHT').classes('text-lg font-bold')
+                        self._dht_status = ui.badge('Checking...', color='yellow')
+                        self._dht_keys_label = ui.label('Keys: -')
+                
+                # Графики (placeholder)
+                with ui.row().classes('w-full gap-4 mt-4'):
+                    with ui.card().classes('flex-1'):
+                        ui.label('Network Activity').classes('text-lg font-bold')
+                        ui.label('Real-time charts coming soon...').classes('text-gray-500')
+                
+                # Быстрые действия
+                ui.label('Quick Actions').classes('text-xl font-bold mt-6 mb-2')
+                with ui.row().classes('gap-2'):
+                    ui.button('Ping All Peers', icon='wifi', on_click=self._ping_all_peers)
+                    ui.button('Refresh DHT', icon='refresh', on_click=self._refresh_dht)
+                    ui.button('View Logs', icon='article', on_click=lambda: ui.navigate.to('/logs'))
+                
+                # Auto-refresh
+                ui.timer(self._update_interval, self._refresh_dashboard)
+    
+    async def _refresh_dashboard(self) -> None:
+        """Обновить данные на dashboard."""
+        self._update_state()
+        
+        if hasattr(self, '_node_id_label'):
+            self._node_id_label.text = f'ID: {self._state.node_id}...'
+        
+        if hasattr(self, '_node_addr_label'):
+            self._node_addr_label.text = f'{self._state.host}:{self._state.port}'
+        
+        if hasattr(self, '_node_status'):
+            if self._state.is_running:
+                self._node_status.set_text('Online')
+                self._node_status._props['color'] = 'green'
+            else:
+                self._node_status.set_text('Offline')
+                self._node_status._props['color'] = 'red'
+            self._node_status.update()
+        
+        if hasattr(self, '_peers_count_label'):
+            self._peers_count_label.text = str(self._state.peers_count)
+        
+        if hasattr(self, '_services_count_label'):
+            self._services_count_label.text = str(len(self._state.services))
+        
+        if hasattr(self, '_dht_status'):
+            if self._state.dht_available:
+                self._dht_status.set_text('Active')
+                self._dht_status._props['color'] = 'green'
+            else:
+                self._dht_status.set_text('Inactive')
+                self._dht_status._props['color'] = 'gray'
+            self._dht_status.update()
+    
+    async def _ping_all_peers(self) -> None:
+        """Отправить ping всем пирам."""
+        ui.notify('Pinging all peers...', type='info')
+        # TODO: Implement
+    
+    async def _refresh_dht(self) -> None:
+        """Обновить DHT."""
+        ui.notify('Refreshing DHT...', type='info')
+        # TODO: Implement
+    
+    def _create_peers_page(self) -> None:
+        """Страница Peers."""
+        
+        @ui.page('/peers')
+        async def peers():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Peers').classes('text-2xl font-bold mb-4')
+                
+                # Таблица пиров
+                columns = [
+                    {'name': 'node_id', 'label': 'Node ID', 'field': 'node_id', 'align': 'left'},
+                    {'name': 'address', 'label': 'Address', 'field': 'address'},
+                    {'name': 'direction', 'label': 'Direction', 'field': 'direction'},
+                    {'name': 'balance', 'label': 'Balance', 'field': 'balance'},
+                    {'name': 'status', 'label': 'Status', 'field': 'status'},
+                    {'name': 'actions', 'label': 'Actions', 'field': 'actions'},
+                ]
+                
+                self._peers_table = ui.table(
+                    columns=columns,
+                    rows=[],
+                    row_key='node_id',
+                ).classes('w-full')
+                
+                with ui.row().classes('mt-4 gap-2'):
+                    ui.button('Refresh', icon='refresh', on_click=self._refresh_peers)
+                    
+                    with ui.input('Bootstrap node').classes('w-64') as bootstrap_input:
+                        pass
+                    ui.button('Connect', icon='add', on_click=lambda: self._connect_to_peer(bootstrap_input.value))
+                
+                ui.timer(self._update_interval, self._refresh_peers)
+    
+    async def _refresh_peers(self) -> None:
+        """Обновить список пиров."""
+        if not self.node:
+            return
+        
+        rows = []
+        peer_manager = getattr(self.node, 'peer_manager', None)
+        if peer_manager:
+            for peer in peer_manager.get_active_peers():
+                balance = 0
+                if self.ledger:
+                    balance = await self.ledger.get_balance(peer.node_id)
+                
+                rows.append({
+                    'node_id': peer.node_id[:16] + '...',
+                    'address': f'{peer.host}:{peer.port}',
+                    'direction': 'OUT' if peer.is_outbound else 'IN',
+                    'balance': f'{balance:+.0f}',
+                    'status': 'BLOCKED' if peer.blocked else 'Active',
+                })
+        
+        if hasattr(self, '_peers_table'):
+            self._peers_table.rows = rows
+            self._peers_table.update()
+    
+    async def _connect_to_peer(self, address: str) -> None:
+        """Подключиться к пиру."""
+        if not address:
+            ui.notify('Enter address', type='warning')
+            return
+        
+        ui.notify(f'Connecting to {address}...', type='info')
+        # TODO: Implement
+    
+    def _create_services_page(self) -> None:
+        """Страница Services."""
+        
+        @ui.page('/services')
+        async def services():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Services').classes('text-2xl font-bold mb-4')
+                
+                if not self.agent_manager:
+                    ui.label('Agent Manager not available').classes('text-red-500')
+                    return
+                
+                # Список услуг
+                with ui.row().classes('w-full gap-4 flex-wrap'):
+                    for name, agent in self.agent_manager._agents.items():
+                        with ui.card().classes('w-72'):
+                            with ui.row().classes('items-center gap-2'):
+                                ui.icon('build').classes('text-2xl')
+                                ui.label(name).classes('text-lg font-bold')
+                            
+                            ui.label(getattr(agent, 'description', 'No description')).classes('text-sm text-gray-500')
+                            ui.label(f'Price: {agent.price_per_unit} per unit').classes('text-sm')
+                            
+                            with ui.row().classes('mt-2'):
+                                ui.button('Test', icon='play_arrow', on_click=lambda n=name: self._test_service(n)).props('size=sm')
+                
+                # Запрос услуги
+                ui.label('Request Service').classes('text-xl font-bold mt-6 mb-2')
+                with ui.card().classes('w-full max-w-2xl'):
+                    with ui.row().classes('w-full gap-4'):
+                        service_select = ui.select(
+                            list(self.agent_manager._agents.keys()),
+                            label='Service',
+                            value='echo'
+                        ).classes('w-48')
+                        
+                        peer_input = ui.input('Peer ID (optional)').classes('w-64')
+                    
+                    payload_input = ui.textarea('Payload (JSON)').classes('w-full')
+                    payload_input.value = '{"message": "Hello"}'
+                    
+                    budget_input = ui.number('Budget', value=10)
+                    
+                    with ui.row().classes('mt-2'):
+                        ui.button('Send Request', icon='send', on_click=lambda: self._send_service_request(
+                            service_select.value,
+                            peer_input.value,
+                            payload_input.value,
+                            budget_input.value
+                        ))
+                    
+                    self._service_result = ui.label('').classes('mt-2 font-mono text-sm')
+    
+    async def _test_service(self, service_name: str) -> None:
+        """Тестировать услугу локально."""
+        if not self.agent_manager:
+            return
+        
+        agent = self.agent_manager._agents.get(service_name)
+        if not agent:
+            ui.notify(f'Service {service_name} not found', type='error')
+            return
+        
+        ui.notify(f'Testing {service_name}...', type='info')
+        
+        # Тестовый payload
+        test_payloads = {
+            'echo': {'message': 'Test from WebUI'},
+            'storage': {'action': 'list', 'owner_id': 'webui'},
+            'compute': {'task': 'eval', 'expression': '2+2'},
+            'web_read': {'url': 'https://example.com'},
+            'llm_local': {'prompt': 'Say hello'},
+        }
+        
+        payload = test_payloads.get(service_name, {})
+        
+        try:
+            result, cost = await agent.execute(payload)
+            ui.notify(f'Result: {result}, Cost: {cost}', type='positive')
+        except Exception as e:
+            ui.notify(f'Error: {e}', type='negative')
+    
+    async def _send_service_request(self, service: str, peer_id: str, payload_json: str, budget: float) -> None:
+        """Отправить запрос услуги."""
+        import json
+        
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            ui.notify(f'Invalid JSON: {e}', type='error')
+            return
+        
+        if peer_id:
+            # Remote request
+            ui.notify(f'Sending {service} request to {peer_id}...', type='info')
+            # TODO: Implement remote request
+        else:
+            # Local request
+            if self.agent_manager:
+                agent = self.agent_manager._agents.get(service)
+                if agent:
+                    try:
+                        result, cost = await agent.execute(payload)
+                        if hasattr(self, '_service_result'):
+                            self._service_result.text = f'Result: {result}\nCost: {cost}'
+                        ui.notify('Success!', type='positive')
+                    except Exception as e:
+                        ui.notify(f'Error: {e}', type='negative')
+    
+    def _create_ai_page(self) -> None:
+        """Страница AI / LLM."""
+        
+        @ui.page('/ai')
+        async def ai():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('AI / LLM').classes('text-2xl font-bold mb-4')
+                
+                # Chat interface
+                with ui.card().classes('w-full max-w-4xl'):
+                    ui.label('Chat with AI').classes('text-lg font-bold')
+                    
+                    # Chat history
+                    self._chat_container = ui.column().classes('w-full h-96 overflow-auto bg-gray-50 dark:bg-gray-900 p-4 rounded')
+                    
+                    # Input
+                    with ui.row().classes('w-full mt-4 gap-2'):
+                        self._chat_input = ui.textarea('Your message...').classes('flex-grow')
+                        
+                        with ui.column().classes('gap-1'):
+                            ui.button('Send', icon='send', on_click=self._send_chat_message).classes('w-full')
+                            ui.button('Clear', icon='delete', on_click=self._clear_chat).classes('w-full')
+                    
+                    # Options
+                    with ui.row().classes('mt-2 gap-4'):
+                        self._model_select = ui.select(
+                            ['llm_local (Ollama)', 'llm_prompt (Cloud)', 'llm_distributed'],
+                            label='Model',
+                            value='llm_local (Ollama)'
+                        )
+                        self._temp_slider = ui.slider(min=0, max=2, value=0.7, step=0.1).props('label')
+                        ui.label('Temperature')
+                
+                # Distributed Inference Status
+                ui.label('Distributed Inference').classes('text-xl font-bold mt-6 mb-2')
+                with ui.card().classes('w-full max-w-4xl'):
+                    with ui.row().classes('gap-4'):
+                        with ui.column():
+                            ui.label('Status').classes('font-bold')
+                            self._dist_status = ui.badge('Checking...', color='yellow')
+                        
+                        with ui.column():
+                            ui.label('Loaded Shards').classes('font-bold')
+                            self._dist_shards = ui.label('-')
+                        
+                        with ui.column():
+                            ui.label('Available Models').classes('font-bold')
+                            self._dist_models = ui.label('-')
+                    
+                    with ui.row().classes('mt-4 gap-2'):
+                        ui.button('Load Shard', icon='download', on_click=self._show_load_shard_dialog)
+                        ui.button('Check Models', icon='search', on_click=self._check_dist_models)
+    
+    async def _send_chat_message(self) -> None:
+        """Отправить сообщение в чат."""
+        if not hasattr(self, '_chat_input'):
+            return
+        
+        message = self._chat_input.value
+        if not message.strip():
+            return
+        
+        # Добавляем сообщение пользователя
+        with self._chat_container:
+            with ui.row().classes('w-full justify-end'):
+                ui.label(message).classes('bg-blue-500 text-white p-2 rounded-lg max-w-md')
+        
+        self._chat_input.value = ''
+        
+        # Получаем ответ
+        model_type = 'llm_local'
+        if 'Cloud' in self._model_select.value:
+            model_type = 'llm_prompt'
+        elif 'distributed' in self._model_select.value:
+            model_type = 'llm_distributed'
+        
+        if self.agent_manager:
+            agent = self.agent_manager._agents.get(model_type)
+            if agent:
+                with self._chat_container:
+                    loading = ui.label('Thinking...').classes('text-gray-500 italic')
+                
+                try:
+                    result, cost = await agent.execute({
+                        'prompt': message,
+                        'temperature': self._temp_slider.value,
+                    })
+                    
+                    loading.delete()
+                    
+                    response = result.get('response', str(result))
+                    with self._chat_container:
+                        with ui.row().classes('w-full'):
+                            ui.label(response).classes('bg-gray-200 dark:bg-gray-700 p-2 rounded-lg max-w-md')
+                    
+                except Exception as e:
+                    loading.text = f'Error: {e}'
+    
+    async def _clear_chat(self) -> None:
+        """Очистить чат."""
+        if hasattr(self, '_chat_container'):
+            self._chat_container.clear()
+    
+    async def _show_load_shard_dialog(self) -> None:
+        """Диалог загрузки shard."""
+        with ui.dialog() as dialog, ui.card():
+            ui.label('Load Model Shard').classes('text-lg font-bold')
+            
+            model_input = ui.select(
+                ['qwen2.5-32b', 'llama2-70b', 'mixtral-8x7b'],
+                label='Model',
+                value='qwen2.5-32b'
+            )
+            layer_start = ui.number('Layer Start', value=0)
+            layer_end = ui.number('Layer End', value=16)
+            use_mock = ui.checkbox('Use Mock (no GPU)')
+            
+            with ui.row().classes('mt-4 gap-2'):
+                ui.button('Load', on_click=lambda: self._load_shard(
+                    dialog, model_input.value, int(layer_start.value), int(layer_end.value), use_mock.value
+                ))
+                ui.button('Cancel', on_click=dialog.close)
+        
+        dialog.open()
+    
+    async def _load_shard(self, dialog, model: str, start: int, end: int, use_mock: bool) -> None:
+        """Загрузить shard."""
+        ui.notify(f'Loading {model} layers {start}-{end}...', type='info')
+        dialog.close()
+        # TODO: Implement
+    
+    async def _check_dist_models(self) -> None:
+        """Проверить доступные distributed модели."""
+        try:
+            from agents.distributed.registry import KNOWN_MODELS
+            models = list(KNOWN_MODELS.keys())
+            if hasattr(self, '_dist_models'):
+                self._dist_models.text = ', '.join(models)
+            ui.notify(f'Found {len(models)} models', type='info')
+        except ImportError:
+            ui.notify('Distributed module not available', type='warning')
+    
+    def _create_dht_page(self) -> None:
+        """Страница DHT."""
+        
+        @ui.page('/dht')
+        async def dht():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Distributed Hash Table').classes('text-2xl font-bold mb-4')
+                
+                if not self.kademlia:
+                    ui.label('DHT not available').classes('text-red-500')
+                    return
+                
+                # DHT Info
+                with ui.card().classes('w-full max-w-2xl'):
+                    ui.label('DHT Status').classes('text-lg font-bold')
+                    with ui.row().classes('gap-8'):
+                        with ui.column():
+                            ui.label('Node ID').classes('font-bold')
+                            self._dht_node_id = ui.label('-').classes('font-mono text-sm')
+                        with ui.column():
+                            ui.label('Stored Keys').classes('font-bold')
+                            self._dht_stored_keys = ui.label('-')
+                        with ui.column():
+                            ui.label('Routing Table').classes('font-bold')
+                            self._dht_routing = ui.label('-')
+                
+                # Put/Get
+                ui.label('Operations').classes('text-xl font-bold mt-6 mb-2')
+                
+                with ui.tabs().classes('w-full') as tabs:
+                    put_tab = ui.tab('Put')
+                    get_tab = ui.tab('Get')
+                    delete_tab = ui.tab('Delete')
+                
+                with ui.tab_panels(tabs, value=put_tab).classes('w-full'):
+                    with ui.tab_panel(put_tab):
+                        with ui.card().classes('w-full'):
+                            key_put = ui.input('Key').classes('w-full')
+                            value_put = ui.textarea('Value').classes('w-full')
+                            ui.button('Store', icon='save', on_click=lambda: self._dht_put(key_put.value, value_put.value))
+                    
+                    with ui.tab_panel(get_tab):
+                        with ui.card().classes('w-full'):
+                            key_get = ui.input('Key').classes('w-full')
+                            ui.button('Retrieve', icon='search', on_click=lambda: self._dht_get(key_get.value))
+                            self._dht_get_result = ui.label('').classes('mt-2 font-mono')
+                    
+                    with ui.tab_panel(delete_tab):
+                        with ui.card().classes('w-full'):
+                            key_del = ui.input('Key').classes('w-full')
+                            ui.button('Delete', icon='delete', color='red', on_click=lambda: self._dht_delete(key_del.value))
+    
+    async def _dht_put(self, key: str, value: str) -> None:
+        """Сохранить в DHT."""
+        if not key or not value:
+            ui.notify('Key and value required', type='warning')
+            return
+        
+        if self.kademlia:
+            try:
+                await self.kademlia.put(key, value.encode())
+                ui.notify(f'Stored: {key}', type='positive')
+            except Exception as e:
+                ui.notify(f'Error: {e}', type='negative')
+    
+    async def _dht_get(self, key: str) -> None:
+        """Получить из DHT."""
+        if not key:
+            ui.notify('Key required', type='warning')
+            return
+        
+        if self.kademlia:
+            try:
+                value = await self.kademlia.get(key)
+                if value:
+                    if hasattr(self, '_dht_get_result'):
+                        self._dht_get_result.text = f'Value: {value.decode()}'
+                    ui.notify('Found!', type='positive')
+                else:
+                    if hasattr(self, '_dht_get_result'):
+                        self._dht_get_result.text = 'Not found'
+                    ui.notify('Key not found', type='warning')
+            except Exception as e:
+                ui.notify(f'Error: {e}', type='negative')
+    
+    async def _dht_delete(self, key: str) -> None:
+        """Удалить из DHT."""
+        if not key:
+            ui.notify('Key required', type='warning')
+            return
+        
+        ui.notify(f'Deleted: {key}', type='info')
+        # TODO: Implement
+    
+    def _create_economy_page(self) -> None:
+        """Страница Economy."""
+        
+        @ui.page('/economy')
+        async def economy():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Economy').classes('text-2xl font-bold mb-4')
+                
+                if not self.ledger:
+                    ui.label('Ledger not available').classes('text-red-500')
+                    return
+                
+                # Summary
+                with ui.row().classes('w-full gap-4 flex-wrap'):
+                    with ui.card().classes('w-64'):
+                        ui.label('Total Owed to Us').classes('font-bold')
+                        self._total_claims = ui.label('0').classes('text-3xl font-bold text-green-500')
+                    
+                    with ui.card().classes('w-64'):
+                        ui.label('Total We Owe').classes('font-bold')
+                        self._total_debts = ui.label('0').classes('text-3xl font-bold text-red-500')
+                    
+                    with ui.card().classes('w-64'):
+                        ui.label('Net Balance').classes('font-bold')
+                        self._net_balance = ui.label('0').classes('text-3xl font-bold')
+                
+                # Balances table
+                ui.label('Balances by Peer').classes('text-xl font-bold mt-6 mb-2')
+                
+                columns = [
+                    {'name': 'peer_id', 'label': 'Peer ID', 'field': 'peer_id', 'align': 'left'},
+                    {'name': 'balance', 'label': 'Balance', 'field': 'balance'},
+                    {'name': 'total_sent', 'label': 'Sent', 'field': 'total_sent'},
+                    {'name': 'total_received', 'label': 'Received', 'field': 'total_received'},
+                    {'name': 'status', 'label': 'Status', 'field': 'status'},
+                ]
+                
+                self._balances_table = ui.table(columns=columns, rows=[]).classes('w-full')
+                
+                ui.button('Refresh', icon='refresh', on_click=self._refresh_economy)
+                ui.timer(5, self._refresh_economy)
+    
+    async def _refresh_economy(self) -> None:
+        """Обновить данные экономики."""
+        if not self.ledger:
+            return
+        
+        try:
+            summary = await self.ledger.get_summary()
+            
+            if hasattr(self, '_total_claims'):
+                self._total_claims.text = f"{summary.get('total_claims', 0):.0f}"
+            
+            if hasattr(self, '_total_debts'):
+                self._total_debts.text = f"{summary.get('total_debts', 0):.0f}"
+            
+            if hasattr(self, '_net_balance'):
+                net = summary.get('total_claims', 0) - summary.get('total_debts', 0)
+                self._net_balance.text = f"{net:+.0f}"
+                if net >= 0:
+                    self._net_balance.classes(replace='text-3xl font-bold text-green-500')
+                else:
+                    self._net_balance.classes(replace='text-3xl font-bold text-red-500')
+            
+            # Balances table
+            balances = await self.ledger.get_all_balances()
+            rows = []
+            for peer_id, data in balances.items():
+                rows.append({
+                    'peer_id': peer_id[:16] + '...',
+                    'balance': f"{data.get('balance', 0):+.0f}",
+                    'total_sent': f"{data.get('total_sent', 0):.0f}",
+                    'total_received': f"{data.get('total_received', 0):.0f}",
+                    'status': 'Blocked' if data.get('blocked') else 'OK',
+                })
+            
+            if hasattr(self, '_balances_table'):
+                self._balances_table.rows = rows
+                self._balances_table.update()
+                
+        except Exception as e:
+            logger.error(f"[WEBUI] Economy refresh error: {e}")
+    
+    def _create_storage_page(self) -> None:
+        """Страница Storage."""
+        
+        @ui.page('/storage')
+        async def storage():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Storage').classes('text-2xl font-bold mb-4')
+                
+                # Upload
+                with ui.card().classes('w-full max-w-2xl'):
+                    ui.label('Upload File').classes('text-lg font-bold')
+                    
+                    self._upload_content = ui.textarea('Content (text)').classes('w-full')
+                    
+                    with ui.row().classes('gap-4'):
+                        ttl_input = ui.number('TTL (hours)', value=24)
+                        ui.button('Store', icon='upload', on_click=lambda: self._store_data(
+                            self._upload_content.value, int(ttl_input.value)
+                        ))
+                    
+                    self._upload_result = ui.label('').classes('mt-2 font-mono text-sm')
+                
+                # Retrieve
+                ui.label('Retrieve').classes('text-xl font-bold mt-6 mb-2')
+                with ui.card().classes('w-full max-w-2xl'):
+                    with ui.row().classes('gap-2'):
+                        storage_id_input = ui.input('Storage ID').classes('flex-grow')
+                        ui.button('Get', icon='download', on_click=lambda: self._get_data(storage_id_input.value))
+                    
+                    self._retrieve_result = ui.textarea('Result').classes('w-full mt-2').props('readonly')
+                
+                # List
+                ui.label('My Files').classes('text-xl font-bold mt-6 mb-2')
+                self._storage_list = ui.column().classes('w-full')
+                ui.button('Refresh', icon='refresh', on_click=self._refresh_storage)
+    
+    async def _store_data(self, content: str, ttl: int) -> None:
+        """Сохранить данные."""
+        if not content:
+            ui.notify('Content required', type='warning')
+            return
+        
+        if self.agent_manager:
+            agent = self.agent_manager._agents.get('storage')
+            if agent:
+                try:
+                    result, cost = await agent.execute({
+                        'action': 'store',
+                        'data': content,
+                        'ttl_hours': ttl,
+                        'owner_id': self._state.node_id[:16],
+                    })
+                    
+                    storage_id = result.get('storage_id', '')
+                    if hasattr(self, '_upload_result'):
+                        self._upload_result.text = f'Stored: {storage_id}'
+                    ui.notify(f'Stored! ID: {storage_id}', type='positive')
+                except Exception as e:
+                    ui.notify(f'Error: {e}', type='negative')
+    
+    async def _get_data(self, storage_id: str) -> None:
+        """Получить данные."""
+        if not storage_id:
+            ui.notify('Storage ID required', type='warning')
+            return
+        
+        if self.agent_manager:
+            agent = self.agent_manager._agents.get('storage')
+            if agent:
+                try:
+                    result, cost = await agent.execute({
+                        'action': 'get',
+                        'storage_id': storage_id,
+                    })
+                    
+                    import base64
+                    data = result.get('data', '')
+                    try:
+                        decoded = base64.b64decode(data).decode('utf-8')
+                    except:
+                        decoded = data
+                    
+                    if hasattr(self, '_retrieve_result'):
+                        self._retrieve_result.value = decoded
+                    ui.notify('Retrieved!', type='positive')
+                except Exception as e:
+                    ui.notify(f'Error: {e}', type='negative')
+    
+    async def _refresh_storage(self) -> None:
+        """Обновить список файлов."""
+        if not hasattr(self, '_storage_list'):
+            return
+        
+        self._storage_list.clear()
+        
+        if self.agent_manager:
+            agent = self.agent_manager._agents.get('storage')
+            if agent:
+                try:
+                    result, cost = await agent.execute({
+                        'action': 'list',
+                        'owner_id': self._state.node_id[:16],
+                    })
+                    
+                    objects = result.get('objects', [])
+                    
+                    with self._storage_list:
+                        if not objects:
+                            ui.label('No files stored').classes('text-gray-500')
+                        else:
+                            for obj in objects:
+                                with ui.card().classes('w-full'):
+                                    with ui.row().classes('justify-between items-center'):
+                                        ui.label(obj['storage_id'][:16] + '...').classes('font-mono')
+                                        ui.label(f"{obj['size_bytes']} bytes")
+                                        ui.button('Delete', icon='delete', color='red', on_click=lambda sid=obj['storage_id']: self._delete_data(sid)).props('size=sm')
+                except Exception as e:
+                    with self._storage_list:
+                        ui.label(f'Error: {e}').classes('text-red-500')
+    
+    async def _delete_data(self, storage_id: str) -> None:
+        """Удалить данные."""
+        if self.agent_manager:
+            agent = self.agent_manager._agents.get('storage')
+            if agent:
+                try:
+                    await agent.execute({
+                        'action': 'delete',
+                        'storage_id': storage_id,
+                    })
+                    ui.notify('Deleted!', type='positive')
+                    await self._refresh_storage()
+                except Exception as e:
+                    ui.notify(f'Error: {e}', type='negative')
+    
+    def _create_compute_page(self) -> None:
+        """Страница Compute."""
+        
+        @ui.page('/compute')
+        async def compute():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Compute').classes('text-2xl font-bold mb-4')
+                
+                # Eval
+                with ui.card().classes('w-full max-w-2xl'):
+                    ui.label('Evaluate Expression').classes('text-lg font-bold')
+                    
+                    expr_input = ui.input('Expression (e.g., 2+2*sin(pi/4))').classes('w-full')
+                    
+                    with ui.row().classes('gap-2'):
+                        ui.button('Evaluate', icon='calculate', on_click=lambda: self._compute_eval(expr_input.value))
+                    
+                    self._eval_result = ui.label('').classes('mt-2 font-mono text-lg')
+                
+                # Math operations
+                ui.label('Math Operations').classes('text-xl font-bold mt-6 mb-2')
+                with ui.card().classes('w-full max-w-2xl'):
+                    with ui.row().classes('gap-4'):
+                        op_select = ui.select(
+                            ['factorial', 'sqrt', 'power', 'prime_check'],
+                            label='Operation',
+                            value='factorial'
+                        )
+                        n_input = ui.number('n', value=10)
+                        base_input = ui.number('base', value=2)
+                        exp_input = ui.number('exp', value=10)
+                    
+                    ui.button('Calculate', icon='calculate', on_click=lambda: self._compute_math(
+                        op_select.value, int(n_input.value), int(base_input.value), int(exp_input.value)
+                    ))
+                    
+                    self._math_result = ui.label('').classes('mt-2 font-mono text-lg')
+                
+                # Hash
+                ui.label('Hash').classes('text-xl font-bold mt-6 mb-2')
+                with ui.card().classes('w-full max-w-2xl'):
+                    hash_input = ui.textarea('Data to hash').classes('w-full')
+                    algo_select = ui.select(['sha256', 'sha512', 'md5', 'blake2b'], value='sha256')
+                    
+                    ui.button('Hash', icon='fingerprint', on_click=lambda: self._compute_hash(
+                        hash_input.value, algo_select.value
+                    ))
+                    
+                    self._hash_result = ui.label('').classes('mt-2 font-mono text-sm break-all')
+    
+    async def _compute_eval(self, expression: str) -> None:
+        """Вычислить выражение."""
+        if not expression:
+            return
+        
+        if self.agent_manager:
+            agent = self.agent_manager._agents.get('compute')
+            if agent:
+                try:
+                    result, cost = await agent.execute({
+                        'task': 'eval',
+                        'expression': expression,
+                    })
+                    
+                    value = result.get('result', result)
+                    if hasattr(self, '_eval_result'):
+                        self._eval_result.text = f'= {value}'
+                except Exception as e:
+                    if hasattr(self, '_eval_result'):
+                        self._eval_result.text = f'Error: {e}'
+    
+    async def _compute_math(self, operation: str, n: int, base: int, exp: int) -> None:
+        """Математическая операция."""
+        if self.agent_manager:
+            agent = self.agent_manager._agents.get('compute')
+            if agent:
+                try:
+                    payload = {'task': 'math', 'operation': operation, 'n': n}
+                    if operation == 'power':
+                        payload['base'] = base
+                        payload['exp'] = exp
+                    
+                    result, cost = await agent.execute(payload)
+                    
+                    value = result.get('result', result)
+                    if hasattr(self, '_math_result'):
+                        self._math_result.text = f'= {value}'
+                except Exception as e:
+                    if hasattr(self, '_math_result'):
+                        self._math_result.text = f'Error: {e}'
+    
+    async def _compute_hash(self, data: str, algorithm: str) -> None:
+        """Вычислить хэш."""
+        if not data:
+            return
+        
+        if self.agent_manager:
+            agent = self.agent_manager._agents.get('compute')
+            if agent:
+                try:
+                    result, cost = await agent.execute({
+                        'task': 'hash',
+                        'data': data,
+                        'algorithm': algorithm,
+                    })
+                    
+                    value = result.get('result', result)
+                    if hasattr(self, '_hash_result'):
+                        self._hash_result.text = f'{algorithm}: {value}'
+                except Exception as e:
+                    if hasattr(self, '_hash_result'):
+                        self._hash_result.text = f'Error: {e}'
+    
+    def _create_settings_page(self) -> None:
+        """Страница Settings."""
+        
+        @ui.page('/settings')
+        async def settings():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Settings').classes('text-2xl font-bold mb-4')
+                
+                with ui.card().classes('w-full max-w-2xl'):
+                    ui.label('Node Settings').classes('text-lg font-bold')
+                    
+                    ui.input('Node ID', value=self._state.node_id).props('readonly')
+                    ui.input('Host', value=self._state.host)
+                    ui.number('Port', value=self._state.port)
+                    
+                    ui.separator()
+                    
+                    ui.label('Network').classes('font-bold mt-4')
+                    ui.number('Max Peers', value=50)
+                    ui.number('Debt Limit (bytes)', value=100_000_000)
+                    
+                    ui.separator()
+                    
+                    ui.label('AI').classes('font-bold mt-4')
+                    ui.input('Ollama Host', value='localhost')
+                    ui.number('Ollama Port', value=11434)
+                    ui.input('Default Model', value='qwen3:32b')
+                    
+                    ui.button('Save', icon='save', on_click=lambda: ui.notify('Settings saved', type='positive'))
+    
+    def _create_logs_page(self) -> None:
+        """Страница Logs."""
+        
+        @ui.page('/logs')
+        async def logs():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Logs').classes('text-2xl font-bold mb-4')
+                
+                with ui.row().classes('gap-2 mb-4'):
+                    ui.button('Clear', icon='delete', on_click=self._clear_logs)
+                    level_select = ui.select(['ALL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'], value='ALL')
+                
+                self._logs_container = ui.column().classes(
+                    'w-full h-96 overflow-auto bg-gray-900 text-green-400 p-4 font-mono text-sm rounded'
+                )
+                
+                # Add some sample logs
+                with self._logs_container:
+                    ui.label('[INFO] Web UI started')
+                    ui.label(f'[INFO] Node ID: {self._state.node_id}')
+    
+    async def _clear_logs(self) -> None:
+        """Очистить логи."""
+        if hasattr(self, '_logs_container'):
+            self._logs_container.clear()
+    
+    def setup_pages(self) -> None:
+        """Настроить все страницы."""
+        self._create_dashboard_page()
+        self._create_peers_page()
+        self._create_services_page()
+        self._create_ai_page()
+        self._create_dht_page()
+        self._create_economy_page()
+        self._create_storage_page()
+        self._create_compute_page()
+        self._create_settings_page()
+        self._create_logs_page()
+    
+    async def start(self, host: str = "0.0.0.0", port: int = 8080) -> None:
+        """
+        Запустить Web UI.
+        
+        Args:
+            host: Адрес для прослушивания
+            port: Порт
+        """
+        if not NICEGUI_AVAILABLE:
+            logger.error("[WEBUI] NiceGUI not installed. Run: pip install nicegui")
+            return
+        
+        self._running = True
+        self._update_state()
+        
+        # Setup pages
+        self.setup_pages()
+        
+        # Configure
+        app.storage.user['dark_mode'] = self.dark_mode
+        
+        logger.info(f"[WEBUI] Starting on http://{host}:{port}")
+        
+        # Run NiceGUI
+        ui.run(
+            host=host,
+            port=port,
+            title=self.title,
+            dark=self.dark_mode,
+            reload=False,
+            show=False,
+        )
+
+
+def create_webui(
+    node=None,
+    ledger=None,
+    agent_manager=None,
+    kademlia=None,
+    **kwargs,
+) -> P2PWebUI:
+    """
+    Factory function для создания WebUI.
+    
+    Args:
+        node: P2P Node
+        ledger: Ledger
+        agent_manager: AgentManager
+        kademlia: KademliaNode
+    
+    Returns:
+        P2PWebUI instance
+    """
+    return P2PWebUI(
+        node=node,
+        ledger=ledger,
+        agent_manager=agent_manager,
+        kademlia=kademlia,
+        **kwargs,
+    )
+
