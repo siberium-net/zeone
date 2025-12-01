@@ -27,3 +27,9 @@ RestrictedPython
 
 # Distributed AI Inference
 numpy>=1.24.0
+
+# PyTorch Model Loading (optional, for real inference)
+# torch>=2.0.0
+# transformers>=4.35.0
+# accelerate>=0.24.0
+# safetensors>=0.4.0

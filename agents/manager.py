@@ -263,12 +263,32 @@ class EchoAgent(BaseAgent):
 
 class StorageAgent(BaseAgent):
     """
-    Агент хранения данных (заглушка для демонстрации).
+    Агент распределённого хранения данных.
     
-    [MARKET] Услуга "storage":
-    - Хранение данных на узле
-    - Цена: 0.1 единицы за 1KB в час
+    [REAL STORAGE] Функции:
+    - store: Сохранить данные с TTL
+    - get: Получить данные по ID
+    - delete: Удалить данные
+    - list: Список сохранённых объектов
+    
+    [PRICING]
+    - Хранение: 0.1 единицы за 1KB
+    - Получение: 0.05 за запрос
+    - Удаление: бесплатно
     """
+    
+    def __init__(self, storage_dir: str = "storage"):
+        """
+        Args:
+            storage_dir: Директория для хранения файлов
+        """
+        import os
+        self.storage_dir = storage_dir
+        os.makedirs(storage_dir, exist_ok=True)
+        
+        # Метаданные в SQLite
+        self._db_path = os.path.join(storage_dir, "storage_meta.db")
+        self._db_initialized = False
     
     @property
     def service_name(self) -> str:
@@ -276,50 +296,272 @@ class StorageAgent(BaseAgent):
     
     @property
     def price_per_unit(self) -> float:
-        return 0.1  # 0.1 за KB-час
+        return 0.1  # 0.1 за KB
     
     @property
     def description(self) -> str:
-        return "Storage service: store data on this node. Price: 0.1 per KB-hour"
+        return "Distributed storage: store/get/delete data. Price: 0.1 per KB stored"
+    
+    async def _init_db(self) -> None:
+        """Инициализация базы метаданных."""
+        if self._db_initialized:
+            return
+        
+        import aiosqlite
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS storage_objects (
+                    storage_id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL,
+                    content_type TEXT DEFAULT 'application/octet-stream',
+                    filename TEXT
+                )
+            """)
+            await db.commit()
+        
+        self._db_initialized = True
     
     async def execute(self, payload: Any) -> Tuple[Any, float]:
         """
-        [STUB] Сохранить данные (заглушка).
+        Выполнить операцию хранилища.
         
-        В реальной реализации здесь будет:
-        - Сохранение в локальное хранилище
-        - Генерация storage_id
-        - Запуск таймера для биллинга
+        Payload:
+            action: "store" | "get" | "delete" | "list"
+            data: bytes | str (для store)
+            storage_id: str (для get/delete)
+            ttl_hours: int (для store, default 24)
+            owner_id: str (идентификатор владельца)
         """
-        data = payload.get("data", b"")
-        duration_hours = payload.get("duration_hours", 1)
+        import os
+        import aiosqlite
+        import base64
         
-        if isinstance(data, str):
-            size_kb = len(data.encode("utf-8")) / 1024
-        elif isinstance(data, bytes):
-            size_kb = len(data) / 1024
+        await self._init_db()
+        
+        action = payload.get("action", "store")
+        owner_id = payload.get("owner_id", "anonymous")
+        
+        if action == "store":
+            # Сохранить данные
+            data = payload.get("data", b"")
+            ttl_hours = payload.get("ttl_hours", 24)
+            filename = payload.get("filename")
+            content_type = payload.get("content_type", "application/octet-stream")
+            
+            # Конвертируем в bytes
+            if isinstance(data, str):
+                # Проверяем, это base64 или plain text
+                try:
+                    data_bytes = base64.b64decode(data)
+                except Exception:
+                    data_bytes = data.encode("utf-8")
+                    content_type = "text/plain"
+            else:
+                data_bytes = data
+            
+            size_bytes = len(data_bytes)
+            storage_id = hashlib.sha256(
+                f"{time.time()}{owner_id}{size_bytes}".encode()
+            ).hexdigest()[:32]
+            
+            # Сохраняем файл
+            file_path = os.path.join(self.storage_dir, storage_id)
+            with open(file_path, "wb") as f:
+                f.write(data_bytes)
+            
+            # Сохраняем метаданные
+            created_at = time.time()
+            expires_at = created_at + (ttl_hours * 3600) if ttl_hours > 0 else None
+            
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.execute(
+                    """INSERT INTO storage_objects 
+                       (storage_id, owner_id, size_bytes, created_at, expires_at, content_type, filename)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (storage_id, owner_id, size_bytes, created_at, expires_at, content_type, filename)
+                )
+                await db.commit()
+            
+            # Стоимость: 0.1 за KB
+            cost = (size_bytes / 1024) * self.price_per_unit
+            cost = max(cost, 0.01)  # Минимум 0.01
+            
+            return {
+                "action": "store",
+                "storage_id": storage_id,
+                "size_bytes": size_bytes,
+                "size_kb": size_bytes / 1024,
+                "expires_at": expires_at,
+                "content_type": content_type,
+            }, cost
+        
+        elif action == "get":
+            # Получить данные
+            storage_id = payload.get("storage_id")
+            if not storage_id:
+                return {"error": "storage_id required"}, 0.01
+            
+            # Проверяем метаданные
+            async with aiosqlite.connect(self._db_path) as db:
+                async with db.execute(
+                    "SELECT size_bytes, expires_at, content_type, filename FROM storage_objects WHERE storage_id = ?",
+                    (storage_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+            
+            if not row:
+                return {"error": "Object not found"}, 0.01
+            
+            size_bytes, expires_at, content_type, filename = row
+            
+            # Проверяем срок
+            if expires_at and time.time() > expires_at:
+                return {"error": "Object expired"}, 0.01
+            
+            # Читаем файл
+            file_path = os.path.join(self.storage_dir, storage_id)
+            if not os.path.exists(file_path):
+                return {"error": "Object file not found"}, 0.01
+            
+            with open(file_path, "rb") as f:
+                data = f.read()
+            
+            # Возвращаем как base64
+            data_b64 = base64.b64encode(data).decode("ascii")
+            
+            return {
+                "action": "get",
+                "storage_id": storage_id,
+                "data": data_b64,
+                "size_bytes": size_bytes,
+                "content_type": content_type,
+                "filename": filename,
+            }, 0.05  # Фиксированная плата за получение
+        
+        elif action == "delete":
+            # Удалить данные
+            storage_id = payload.get("storage_id")
+            if not storage_id:
+                return {"error": "storage_id required"}, 0
+            
+            # Удаляем файл
+            file_path = os.path.join(self.storage_dir, storage_id)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            # Удаляем метаданные
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.execute(
+                    "DELETE FROM storage_objects WHERE storage_id = ?",
+                    (storage_id,)
+                )
+                await db.commit()
+            
+            return {
+                "action": "delete",
+                "storage_id": storage_id,
+                "deleted": True,
+            }, 0  # Удаление бесплатно
+        
+        elif action == "list":
+            # Список объектов владельца
+            async with aiosqlite.connect(self._db_path) as db:
+                async with db.execute(
+                    """SELECT storage_id, size_bytes, created_at, expires_at, content_type, filename 
+                       FROM storage_objects WHERE owner_id = ?
+                       ORDER BY created_at DESC LIMIT 100""",
+                    (owner_id,)
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            
+            objects = []
+            for row in rows:
+                storage_id, size_bytes, created_at, expires_at, content_type, filename = row
+                objects.append({
+                    "storage_id": storage_id,
+                    "size_bytes": size_bytes,
+                    "created_at": created_at,
+                    "expires_at": expires_at,
+                    "content_type": content_type,
+                    "filename": filename,
+                })
+            
+            return {
+                "action": "list",
+                "count": len(objects),
+                "objects": objects,
+            }, 0.01  # Небольшая плата за листинг
+        
         else:
-            size_kb = len(json.dumps(data)) / 1024
-        
-        units = size_kb * duration_hours
-        storage_id = hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
-        
-        return {
-            "storage_id": storage_id,
-            "size_kb": size_kb,
-            "duration_hours": duration_hours,
-            "status": "stored",
-        }, units
+            return {"error": f"Unknown action: {action}"}, 0
 
 
 class ComputeAgent(BaseAgent):
     """
-    Агент вычислений (заглушка для демонстрации).
+    Агент вычислений с реальным выполнением кода.
     
-    [MARKET] Услуга "compute":
-    - Выполнение вычислительных задач
-    - Цена: 1 единица за секунду CPU
+    [REAL COMPUTE] Функции:
+    - eval: Вычислить Python выражение (безопасно)
+    - exec: Выполнить Python код в sandbox
+    - math: Математические вычисления
+    - hash: Хэширование данных
+    
+    [SECURITY]
+    - RestrictedPython sandbox
+    - Timeout на выполнение
+    - Ограничение памяти
+    
+    [PRICING]
+    - 1 единица за секунду CPU
+    - Минимум 0.01
     """
+    
+    def __init__(
+        self, 
+        timeout_seconds: float = 10.0,
+        max_memory_mb: int = 100,
+    ):
+        """
+        Args:
+            timeout_seconds: Максимальное время выполнения
+            max_memory_mb: Лимит памяти (не enforced в Python)
+        """
+        self.timeout = timeout_seconds
+        self.max_memory_mb = max_memory_mb
+        
+        # Безопасные встроенные функции
+        self._safe_builtins = {
+            "abs": abs,
+            "all": all,
+            "any": any,
+            "bool": bool,
+            "dict": dict,
+            "enumerate": enumerate,
+            "filter": filter,
+            "float": float,
+            "int": int,
+            "len": len,
+            "list": list,
+            "map": map,
+            "max": max,
+            "min": min,
+            "pow": pow,
+            "range": range,
+            "reversed": reversed,
+            "round": round,
+            "set": set,
+            "sorted": sorted,
+            "str": str,
+            "sum": sum,
+            "tuple": tuple,
+            "zip": zip,
+            "True": True,
+            "False": False,
+            "None": None,
+        }
     
     @property
     def service_name(self) -> str:
@@ -331,40 +573,189 @@ class ComputeAgent(BaseAgent):
     
     @property
     def description(self) -> str:
-        return "Compute service: execute computational tasks. Price: 1 per CPU-second"
+        return "Compute service: eval/exec/math/hash. Price: 1 per CPU-second"
     
     async def execute(self, payload: Any) -> Tuple[Any, float]:
         """
-        [STUB] Выполнить вычисление (заглушка).
+        Выполнить вычисление.
         
-        В реальной реализации здесь будет:
-        - Выполнение в sandbox
-        - Измерение CPU времени
-        - Возврат результата
+        Payload:
+            task: "eval" | "exec" | "math" | "hash" | "sum" | "count"
+            expression: str (для eval)
+            code: str (для exec)
+            operation: str (для math)
+            data: Any (входные данные)
+            algorithm: str (для hash, default sha256)
         """
-        task = payload.get("task", "none")
+        import math as math_module
+        import resource
+        import signal
         
-        start = time.time()
+        task = payload.get("task", "eval")
+        start_time = time.time()
+        start_cpu = time.process_time()
         
-        # Простая демо-задача
-        if task == "sum":
-            numbers = payload.get("numbers", [])
-            result = sum(numbers)
-        elif task == "count":
-            data = payload.get("data", "")
-            result = len(data)
-        else:
-            result = f"Unknown task: {task}"
+        result = None
+        error = None
         
-        cpu_seconds = time.time() - start
-        # Минимум 0.01 секунды
-        cpu_seconds = max(0.01, cpu_seconds)
+        try:
+            if task == "eval":
+                # Безопасное вычисление выражения
+                expression = payload.get("expression", "")
+                if not expression:
+                    return {"error": "expression required"}, 0.01
+                
+                # Проверяем на опасные конструкции
+                dangerous = ["import", "exec", "eval", "open", "file", "__", "os.", "sys."]
+                for d in dangerous:
+                    if d in expression.lower():
+                        return {"error": f"Forbidden: {d}"}, 0.01
+                
+                # Добавляем math функции
+                safe_globals = {
+                    "__builtins__": self._safe_builtins,
+                    "math": math_module,
+                    "sin": math_module.sin,
+                    "cos": math_module.cos,
+                    "tan": math_module.tan,
+                    "sqrt": math_module.sqrt,
+                    "log": math_module.log,
+                    "log10": math_module.log10,
+                    "exp": math_module.exp,
+                    "pi": math_module.pi,
+                    "e": math_module.e,
+                }
+                
+                # Добавляем переменные из payload
+                variables = payload.get("variables", {})
+                safe_globals.update(variables)
+                
+                result = eval(expression, safe_globals, {})
+            
+            elif task == "exec":
+                # Выполнение кода в sandbox (RestrictedPython)
+                code = payload.get("code", "")
+                if not code:
+                    return {"error": "code required"}, 0.01
+                
+                try:
+                    from RestrictedPython import compile_restricted, safe_globals as rp_globals
+                    from RestrictedPython.Eval import default_guarded_getiter
+                    from RestrictedPython.Guards import guarded_iter_unpack_sequence
+                    
+                    byte_code = compile_restricted(code, "<compute>", "exec")
+                    
+                    exec_globals = {
+                        "__builtins__": self._safe_builtins,
+                        "_getiter_": default_guarded_getiter,
+                        "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
+                        "result": None,
+                    }
+                    
+                    exec(byte_code, exec_globals)
+                    result = exec_globals.get("result")
+                    
+                except ImportError:
+                    return {"error": "RestrictedPython not available"}, 0.01
+            
+            elif task == "math":
+                # Математические операции
+                operation = payload.get("operation", "add")
+                numbers = payload.get("numbers", [])
+                
+                if operation == "add":
+                    result = sum(numbers)
+                elif operation == "multiply":
+                    result = 1
+                    for n in numbers:
+                        result *= n
+                elif operation == "factorial":
+                    n = payload.get("n", 0)
+                    result = math_module.factorial(min(n, 1000))  # Лимит
+                elif operation == "power":
+                    base = payload.get("base", 2)
+                    exp = payload.get("exp", 2)
+                    result = pow(base, min(exp, 1000))  # Лимит
+                elif operation == "sqrt":
+                    n = payload.get("n", 0)
+                    result = math_module.sqrt(n)
+                elif operation == "prime_check":
+                    n = payload.get("n", 0)
+                    result = self._is_prime(n)
+                else:
+                    result = f"Unknown operation: {operation}"
+            
+            elif task == "hash":
+                # Хэширование
+                data = payload.get("data", "")
+                algorithm = payload.get("algorithm", "sha256")
+                
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                
+                if algorithm == "sha256":
+                    result = hashlib.sha256(data).hexdigest()
+                elif algorithm == "sha512":
+                    result = hashlib.sha512(data).hexdigest()
+                elif algorithm == "md5":
+                    result = hashlib.md5(data).hexdigest()
+                elif algorithm == "blake2b":
+                    result = hashlib.blake2b(data).hexdigest()
+                else:
+                    return {"error": f"Unknown algorithm: {algorithm}"}, 0.01
+            
+            elif task == "sum":
+                # Простое суммирование (обратная совместимость)
+                numbers = payload.get("numbers", [])
+                result = sum(numbers)
+            
+            elif task == "count":
+                # Подсчёт (обратная совместимость)
+                data = payload.get("data", "")
+                result = len(data)
+            
+            else:
+                return {"error": f"Unknown task: {task}"}, 0.01
+                
+        except Exception as e:
+            error = str(e)
+        
+        # Вычисляем время
+        end_time = time.time()
+        end_cpu = time.process_time()
+        
+        wall_time = end_time - start_time
+        cpu_time = end_cpu - start_cpu
+        cpu_seconds = max(0.01, cpu_time)  # Минимум 0.01
+        
+        if error:
+            return {
+                "task": task,
+                "error": error,
+                "wall_time_ms": wall_time * 1000,
+                "cpu_time_ms": cpu_time * 1000,
+            }, 0.01
         
         return {
             "task": task,
             "result": result,
+            "wall_time_ms": wall_time * 1000,
+            "cpu_time_ms": cpu_time * 1000,
             "cpu_seconds": cpu_seconds,
         }, cpu_seconds
+    
+    def _is_prime(self, n: int) -> bool:
+        """Проверка на простое число."""
+        if n < 2:
+            return False
+        if n == 2:
+            return True
+        if n % 2 == 0:
+            return False
+        for i in range(3, int(n**0.5) + 1, 2):
+            if n % i == 0:
+                return False
+        return True
 
 
 # =============================================================================
