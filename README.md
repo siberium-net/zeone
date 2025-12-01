@@ -1,3 +1,5 @@
+"🚧 STATUS: EXPERIMENTAL / LOOKING FOR NODES 🚧"
+
 # P2P Network Skeleton
 
 Каркас децентрализованной P2P-сети нового поколения на Python (asyncio).
