@@ -100,6 +100,9 @@ class P2PWebUI:
         
         # Callbacks для обновления UI
         self._update_callbacks: list = []
+        
+        # Cortex UI state
+        self._use_council = False
     
     def _update_state(self) -> None:
         """Обновить состояние из node."""
@@ -1143,8 +1146,8 @@ class P2PWebUI:
                             self._cortex_topic_input.value = 'quantum computing'
                             
                             with ui.row().classes('gap-4 mt-4'):
-                                ui.checkbox('Use Council (3 analysts)').bind_value_to(self, '_use_council')
-                                self._use_council = False
+                                self._council_checkbox = ui.checkbox('Use Council (3 analysts)', value=self._use_council)
+                                self._council_checkbox.on_value_change(lambda e: setattr(self, '_use_council', e.value))
                                 
                                 budget_input = ui.number('Budget', value=50)
                             
@@ -1257,23 +1260,23 @@ class P2PWebUI:
                                     style="width: 100%; height: 600px; border: 1px solid #333; border-radius: 8px;"
                                     allow="fullscreen"
                                 ></iframe>
-                            ''').classes('w-full')
+                            ''', sanitize=False).classes('w-full')
                             
                             # Legend
                             with ui.card().classes('w-full mt-4'):
                                 ui.label('Node Types').classes('font-bold')
                                 with ui.row().classes('gap-6 mt-2'):
                                     with ui.row().classes('items-center gap-2'):
-                                        ui.html('<div style="width:12px;height:12px;border-radius:50%;background:#ffffff;"></div>')
+                                        ui.element('div').style('width:12px;height:12px;border-radius:50%;background:#ffffff;')
                                         ui.label('My Node')
                                     with ui.row().classes('items-center gap-2'):
-                                        ui.html('<div style="width:12px;height:12px;border-radius:50%;background:#00ffff;"></div>')
+                                        ui.element('div').style('width:12px;height:12px;border-radius:50%;background:#00ffff;')
                                         ui.label('Scout')
                                     with ui.row().classes('items-center gap-2'):
-                                        ui.html('<div style="width:12px;height:12px;border-radius:50%;background:#bf40ff;"></div>')
+                                        ui.element('div').style('width:12px;height:12px;border-radius:50%;background:#bf40ff;')
                                         ui.label('Analyst')
                                     with ui.row().classes('items-center gap-2'):
-                                        ui.html('<div style="width:12px;height:12px;border-radius:50%;background:#ffd700;"></div>')
+                                        ui.element('div').style('width:12px;height:12px;border-radius:50%;background:#ffd700;')
                                         ui.label('Librarian')
                 
                 # Auto-refresh
