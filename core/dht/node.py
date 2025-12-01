@@ -106,11 +106,23 @@ class KademliaNode:
         """
         Конвертировать node_id в 20 байт.
         
-        Node ID в базовом узле - это hex-строка публичного ключа (64 байта).
+        Node ID в базовом узле - это Base64-строка публичного ключа (32 байта).
         Для Kademlia нужен 20-байтный ID (SHA-1).
         """
-        # Берём SHA-1 от полного node_id
-        return hashlib.sha1(bytes.fromhex(node_id)).digest()
+        import base64
+        # node_id это Base64-encoded verify key
+        try:
+            raw_key = base64.b64decode(node_id)
+        except Exception:
+            # Fallback: если это hex строка
+            try:
+                raw_key = bytes.fromhex(node_id)
+            except Exception:
+                # Последний fallback: hash от строки
+                raw_key = node_id.encode('utf-8')
+        
+        # Берём SHA-1 для получения 20 байт
+        return hashlib.sha1(raw_key).digest()
     
     async def start(self) -> None:
         """Запустить DHT функциональность."""

@@ -391,8 +391,9 @@ class Node:
         self._running = False
         logger.info("[NODE] Stopping...")
         
-        # Отменяем фоновые задачи
-        for task in self._tasks:
+        # Отменяем фоновые задачи (копируем set чтобы избежать изменения во время итерации)
+        tasks_to_cancel = list(self._tasks)
+        for task in tasks_to_cancel:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
