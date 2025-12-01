@@ -7,10 +7,13 @@ P2P Node Web UI - Главное приложение
 - Async интеграция с Node
 - WebSocket для real-time updates
 - Modular pages
+- 3D Neural Visualization (Three.js)
 """
 
 import asyncio
 import logging
+import os
+from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -24,6 +27,9 @@ try:
 except ImportError:
     NICEGUI_AVAILABLE = False
     logger.warning("[WEBUI] NiceGUI not installed. Run: pip install nicegui")
+
+# Path to static files
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 @dataclass
@@ -63,6 +69,8 @@ class P2PWebUI:
         ledger=None,
         agent_manager=None,
         kademlia=None,
+        cortex=None,
+        visualizer=None,
         title: str = "P2P Node",
         dark_mode: bool = True,
     ):
@@ -72,6 +80,8 @@ class P2PWebUI:
             ledger: Ledger instance
             agent_manager: AgentManager instance
             kademlia: KademliaNode instance
+            cortex: CortexService instance
+            visualizer: CortexVisualizer instance
             title: Заголовок страницы
             dark_mode: Тёмная тема
         """
@@ -79,6 +89,8 @@ class P2PWebUI:
         self.ledger = ledger
         self.agent_manager = agent_manager
         self.kademlia = kademlia
+        self.cortex = cortex
+        self.visualizer = visualizer
         self.title = title
         self.dark_mode = dark_mode
         
@@ -139,6 +151,7 @@ class P2PWebUI:
                 ui.button('Peers', icon='people', on_click=lambda: ui.navigate.to('/peers')).classes('w-full justify-start')
                 ui.button('Services', icon='build', on_click=lambda: ui.navigate.to('/services')).classes('w-full justify-start')
                 ui.button('AI / LLM', icon='psychology', on_click=lambda: ui.navigate.to('/ai')).classes('w-full justify-start')
+                ui.button('Cortex', icon='hub', on_click=lambda: ui.navigate.to('/cortex')).classes('w-full justify-start')
                 ui.button('DHT', icon='storage', on_click=lambda: ui.navigate.to('/dht')).classes('w-full justify-start')
                 ui.button('Economy', icon='account_balance', on_click=lambda: ui.navigate.to('/economy')).classes('w-full justify-start')
                 ui.button('Storage', icon='folder', on_click=lambda: ui.navigate.to('/storage')).classes('w-full justify-start')
@@ -1073,18 +1086,584 @@ class P2PWebUI:
         if hasattr(self, '_logs_container'):
             self._logs_container.clear()
     
+    def _create_cortex_page(self) -> None:
+        """Страница Cortex - Автономная система знаний."""
+        
+        @ui.page('/cortex')
+        async def cortex():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+                ui.label('Cortex - Автономная Система Знаний').classes('text-2xl font-bold mb-4')
+                
+                # Status cards
+                with ui.row().classes('w-full gap-4 flex-wrap mb-6'):
+                    # Cortex Status
+                    with ui.card().classes('w-64'):
+                        ui.label('Cortex Status').classes('text-lg font-bold')
+                        self._cortex_status = ui.badge('Checking...', color='yellow')
+                        self._cortex_automata = ui.label('Automata: -')
+                    
+                    # Investigations
+                    with ui.card().classes('w-64'):
+                        ui.label('Investigations').classes('text-lg font-bold')
+                        self._cortex_inv_count = ui.label('0').classes('text-4xl font-bold text-blue-500')
+                        ui.label('completed').classes('text-sm text-gray-500')
+                    
+                    # Library
+                    with ui.card().classes('w-64'):
+                        ui.label('Library').classes('text-lg font-bold')
+                        self._cortex_lib_topics = ui.label('0').classes('text-4xl font-bold text-green-500')
+                        ui.label('topics indexed').classes('text-sm text-gray-500')
+                    
+                    # Open Bounties
+                    with ui.card().classes('w-64'):
+                        ui.label('Open Bounties').classes('text-lg font-bold')
+                        self._cortex_bounties = ui.label('0').classes('text-4xl font-bold text-orange-500')
+                        ui.label('available').classes('text-sm text-gray-500')
+                
+                # Tabs
+                with ui.tabs().classes('w-full') as tabs:
+                    investigate_tab = ui.tab('Investigate')
+                    library_tab = ui.tab('Library')
+                    council_tab = ui.tab('Council')
+                    bounties_tab = ui.tab('Bounties')
+                    activity_tab = ui.tab('Activity')
+                    neural_tab = ui.tab('Neural 3D')
+                
+                with ui.tab_panels(tabs, value=investigate_tab).classes('w-full'):
+                    # INVESTIGATE TAB
+                    with ui.tab_panel(investigate_tab):
+                        with ui.card().classes('w-full max-w-2xl'):
+                            ui.label('Investigate Topic').classes('text-lg font-bold')
+                            ui.label('Scout → Analyst → Librarian → DHT').classes('text-sm text-gray-500 mb-4')
+                            
+                            self._cortex_topic_input = ui.input('Topic to investigate').classes('w-full')
+                            self._cortex_topic_input.value = 'quantum computing'
+                            
+                            with ui.row().classes('gap-4 mt-4'):
+                                ui.checkbox('Use Council (3 analysts)').bind_value_to(self, '_use_council')
+                                self._use_council = False
+                                
+                                budget_input = ui.number('Budget', value=50)
+                            
+                            with ui.row().classes('gap-2 mt-4'):
+                                ui.button(
+                                    'Start Investigation',
+                                    icon='search',
+                                    on_click=lambda: self._start_investigation(
+                                        self._cortex_topic_input.value,
+                                        self._use_council,
+                                        budget_input.value,
+                                    )
+                                ).classes('bg-blue-500')
+                                
+                                ui.button(
+                                    'Quick Search',
+                                    icon='bolt',
+                                    on_click=lambda: self._quick_search(self._cortex_topic_input.value)
+                                )
+                            
+                            # Status
+                            self._cortex_inv_status = ui.label('').classes('mt-4 text-sm')
+                            
+                            # Result
+                            self._cortex_inv_result = ui.card().classes('w-full mt-4 hidden')
+                    
+                    # LIBRARY TAB
+                    with ui.tab_panel(library_tab):
+                        with ui.card().classes('w-full'):
+                            ui.label('Semantic Library').classes('text-lg font-bold')
+                            
+                            with ui.row().classes('gap-2 mb-4'):
+                                self._lib_search_input = ui.input('Search topic').classes('flex-grow')
+                                ui.button('Search', icon='search', on_click=lambda: self._search_library(self._lib_search_input.value))
+                            
+                            self._lib_results = ui.column().classes('w-full')
+                    
+                    # COUNCIL TAB  
+                    with ui.tab_panel(council_tab):
+                        with ui.card().classes('w-full max-w-4xl'):
+                            ui.label('Convene Council').classes('text-lg font-bold')
+                            ui.label('Parallel analysis by multiple analysts + Judge synthesis').classes('text-sm text-gray-500 mb-4')
+                            
+                            council_topic = ui.input('Topic').classes('w-full')
+                            council_text = ui.textarea('Text to analyze').classes('w-full h-48')
+                            council_budget = ui.number('Budget', value=100)
+                            
+                            ui.button(
+                                'Convene Council',
+                                icon='groups',
+                                on_click=lambda: self._convene_council(
+                                    council_topic.value,
+                                    council_text.value,
+                                    council_budget.value,
+                                )
+                            ).classes('mt-4 bg-purple-500')
+                            
+                            # Council status
+                            self._council_status = ui.column().classes('w-full mt-4')
+                    
+                    # BOUNTIES TAB
+                    with ui.tab_panel(bounties_tab):
+                        with ui.card().classes('w-full'):
+                            ui.label('Open Bounties').classes('text-lg font-bold mb-4')
+                            
+                            with ui.row().classes('gap-2 mb-4'):
+                                bounty_topic = ui.input('New bounty topic').classes('flex-grow')
+                                bounty_reward = ui.number('Reward', value=10)
+                                ui.button(
+                                    'Create Bounty',
+                                    icon='add',
+                                    on_click=lambda: self._create_bounty(bounty_topic.value, bounty_reward.value)
+                                )
+                            
+                            ui.button('Refresh', icon='refresh', on_click=self._refresh_bounties)
+                            
+                            self._bounties_list = ui.column().classes('w-full mt-4')
+                    
+                    # ACTIVITY TAB
+                    with ui.tab_panel(activity_tab):
+                        with ui.card().classes('w-full'):
+                            ui.label('Recent Activity').classes('text-lg font-bold mb-4')
+                            
+                            ui.button('Refresh', icon='refresh', on_click=self._refresh_activity)
+                            
+                            self._activity_list = ui.column().classes('w-full mt-4')
+                    
+                    # NEURAL 3D TAB
+                    with ui.tab_panel(neural_tab):
+                        with ui.column().classes('w-full'):
+                            ui.label('Neural Network Visualization').classes('text-lg font-bold mb-2')
+                            ui.label('3D interactive view of Cortex agents and connections').classes('text-sm text-gray-500 mb-4')
+                            
+                            with ui.row().classes('gap-2 mb-2'):
+                                ui.button(
+                                    'Open Fullscreen',
+                                    icon='fullscreen',
+                                    on_click=lambda: ui.run_javascript('window.open("/static/cortex_vis.html", "_blank")')
+                                ).classes('bg-blue-500')
+                                ui.button(
+                                    'Refresh Graph',
+                                    icon='refresh',
+                                    on_click=self._refresh_neural_graph
+                                )
+                            
+                            # Embedded iframe
+                            ui.html('''
+                                <iframe 
+                                    src="/static/cortex_vis.html" 
+                                    style="width: 100%; height: 600px; border: 1px solid #333; border-radius: 8px;"
+                                    allow="fullscreen"
+                                ></iframe>
+                            ''').classes('w-full')
+                            
+                            # Legend
+                            with ui.card().classes('w-full mt-4'):
+                                ui.label('Node Types').classes('font-bold')
+                                with ui.row().classes('gap-6 mt-2'):
+                                    with ui.row().classes('items-center gap-2'):
+                                        ui.html('<div style="width:12px;height:12px;border-radius:50%;background:#ffffff;"></div>')
+                                        ui.label('My Node')
+                                    with ui.row().classes('items-center gap-2'):
+                                        ui.html('<div style="width:12px;height:12px;border-radius:50%;background:#00ffff;"></div>')
+                                        ui.label('Scout')
+                                    with ui.row().classes('items-center gap-2'):
+                                        ui.html('<div style="width:12px;height:12px;border-radius:50%;background:#bf40ff;"></div>')
+                                        ui.label('Analyst')
+                                    with ui.row().classes('items-center gap-2'):
+                                        ui.html('<div style="width:12px;height:12px;border-radius:50%;background:#ffd700;"></div>')
+                                        ui.label('Librarian')
+                
+                # Auto-refresh
+                ui.timer(5.0, self._refresh_cortex_stats)
+    
+    async def _refresh_cortex_stats(self) -> None:
+        """Обновить статистику Cortex."""
+        if not self.cortex:
+            if hasattr(self, '_cortex_status'):
+                self._cortex_status.set_text('Not Available')
+                self._cortex_status._props['color'] = 'red'
+                self._cortex_status.update()
+            return
+        
+        try:
+            stats = await self.cortex.get_stats_async()
+            
+            if hasattr(self, '_cortex_status'):
+                if stats['service']['running']:
+                    self._cortex_status.set_text('Running')
+                    self._cortex_status._props['color'] = 'green'
+                else:
+                    self._cortex_status.set_text('Stopped')
+                    self._cortex_status._props['color'] = 'gray'
+                self._cortex_status.update()
+            
+            if hasattr(self, '_cortex_automata'):
+                automata = stats.get('automata', {})
+                self._cortex_automata.text = f"Automata: {'Running' if automata.get('running') else 'Stopped'}"
+            
+            if hasattr(self, '_cortex_inv_count'):
+                self._cortex_inv_count.text = str(stats.get('automata', {}).get('successful_investigations', 0))
+            
+            if hasattr(self, '_cortex_lib_topics'):
+                self._cortex_lib_topics.text = str(stats.get('library', {}).get('cached_topics', 0))
+            
+            if hasattr(self, '_cortex_bounties'):
+                self._cortex_bounties.text = str(stats.get('library', {}).get('open_bounties', 0))
+                
+        except Exception as e:
+            logger.warning(f"[WEBUI] Cortex stats error: {e}")
+    
+    async def _start_investigation(self, topic: str, use_council: bool, budget: float) -> None:
+        """Начать исследование темы."""
+        if not topic:
+            ui.notify('Enter a topic', type='warning')
+            return
+        
+        if not self.cortex:
+            ui.notify('Cortex not available', type='error')
+            return
+        
+        if hasattr(self, '_cortex_inv_status'):
+            self._cortex_inv_status.text = f"Investigating '{topic}'..."
+        
+        ui.notify(f"Starting investigation: {topic}", type='info')
+        
+        try:
+            result = await self.cortex.investigate(topic, use_council=use_council, budget=budget)
+            
+            if result.get('success'):
+                if hasattr(self, '_cortex_inv_status'):
+                    self._cortex_inv_status.text = f"[OK] Investigation complete!"
+                
+                # Show result
+                if hasattr(self, '_cortex_inv_result'):
+                    self._cortex_inv_result.clear()
+                    self._cortex_inv_result.classes(remove='hidden')
+                    
+                    with self._cortex_inv_result:
+                        ui.label('Result').classes('text-lg font-bold')
+                        ui.label(f"Method: {result.get('method', 'unknown')}").classes('text-sm')
+                        ui.label(f"CID: {result.get('cid', 'N/A')[:32]}...").classes('text-sm font-mono')
+                        ui.label(f"Confidence: {result.get('confidence', 0):.2f}").classes('text-sm')
+                        
+                        ui.separator()
+                        
+                        ui.label('Summary').classes('font-bold mt-2')
+                        ui.label(result.get('summary', 'No summary')).classes('text-sm')
+                        
+                        if result.get('facts'):
+                            ui.label('Key Facts').classes('font-bold mt-2')
+                            for fact in result.get('facts', [])[:5]:
+                                ui.label(f"• {fact}").classes('text-sm')
+                
+                ui.notify('Investigation complete!', type='positive')
+            else:
+                if hasattr(self, '_cortex_inv_status'):
+                    self._cortex_inv_status.text = f"[FAIL] {result.get('error', 'Unknown error')}"
+                ui.notify(f"Investigation failed: {result.get('error')}", type='negative')
+                
+        except Exception as e:
+            if hasattr(self, '_cortex_inv_status'):
+                self._cortex_inv_status.text = f"[ERROR] {str(e)}"
+            ui.notify(f"Error: {e}", type='negative')
+    
+    async def _quick_search(self, topic: str) -> None:
+        """Быстрый поиск в библиотеке."""
+        if not topic:
+            ui.notify('Enter a topic', type='warning')
+            return
+        
+        if not self.cortex:
+            ui.notify('Cortex not available', type='error')
+            return
+        
+        try:
+            reports = await self.cortex.search(topic)
+            
+            if reports:
+                ui.notify(f'Found {len(reports)} reports', type='positive')
+                # Show first result
+                if hasattr(self, '_cortex_inv_result'):
+                    self._cortex_inv_result.clear()
+                    self._cortex_inv_result.classes(remove='hidden')
+                    
+                    with self._cortex_inv_result:
+                        report = reports[0]
+                        ui.label(f"Found: {report.topic}").classes('text-lg font-bold')
+                        ui.label(f"Quality: {report.quality_score:.2f}").classes('text-sm')
+                        ui.label(report.summary).classes('mt-2')
+            else:
+                ui.notify('No reports found - try investigating', type='warning')
+                
+        except Exception as e:
+            ui.notify(f"Search error: {e}", type='negative')
+    
+    async def _search_library(self, query: str) -> None:
+        """Поиск в библиотеке."""
+        if not query:
+            return
+        
+        if not self.cortex:
+            ui.notify('Cortex not available', type='error')
+            return
+        
+        if hasattr(self, '_lib_results'):
+            self._lib_results.clear()
+            
+            with self._lib_results:
+                ui.label(f"Searching for '{query}'...").classes('text-gray-500')
+        
+        try:
+            reports = await self.cortex.search(query)
+            
+            if hasattr(self, '_lib_results'):
+                self._lib_results.clear()
+                
+                with self._lib_results:
+                    if not reports:
+                        ui.label('No results found').classes('text-gray-500')
+                        ui.button(
+                            f'Investigate "{query}"',
+                            icon='search',
+                            on_click=lambda: self._start_investigation(query, False, 50)
+                        )
+                    else:
+                        for report in reports:
+                            with ui.card().classes('w-full mb-2'):
+                                with ui.row().classes('justify-between items-start'):
+                                    with ui.column():
+                                        ui.label(report.topic).classes('font-bold')
+                                        ui.label(report.summary[:200] + '...' if len(report.summary) > 200 else report.summary).classes('text-sm')
+                                    
+                                    with ui.column().classes('text-right'):
+                                        ui.badge(f'{report.quality_score:.2f}', color='green' if report.quality_score > 0.7 else 'yellow')
+                                        ui.label(report.sentiment).classes('text-xs')
+                                
+                                if report.key_facts:
+                                    ui.label('Facts:').classes('text-sm font-bold mt-2')
+                                    for fact in report.key_facts[:3]:
+                                        ui.label(f"• {fact}").classes('text-xs')
+                                        
+        except Exception as e:
+            ui.notify(f"Search error: {e}", type='negative')
+    
+    async def _convene_council(self, topic: str, text: str, budget: float) -> None:
+        """Созвать совет аналитиков."""
+        if not topic or not text:
+            ui.notify('Enter topic and text', type='warning')
+            return
+        
+        if not self.cortex:
+            ui.notify('Cortex not available', type='error')
+            return
+        
+        if hasattr(self, '_council_status'):
+            self._council_status.clear()
+            with self._council_status:
+                ui.label('Council convening...').classes('text-blue-500')
+                ui.spinner()
+        
+        ui.notify('Convening council...', type='info')
+        
+        try:
+            result = await self.cortex.convene_council(topic, text, budget)
+            
+            if hasattr(self, '_council_status'):
+                self._council_status.clear()
+                
+                with self._council_status:
+                    status_color = 'green' if result.status.value == 'completed' else 'red'
+                    ui.badge(result.status.value.upper(), color=status_color)
+                    
+                    ui.label(f"Confidence: {result.confidence:.2f}").classes('mt-2')
+                    ui.label(f"Agreement: {result.analyst_agreement:.2f}")
+                    ui.label(f"Participants: {len(result.participants)}")
+                    ui.label(f"Cost: {result.total_cost:.2f}")
+                    
+                    ui.separator()
+                    
+                    ui.label('Final Summary').classes('font-bold mt-2')
+                    ui.label(result.final_summary)
+                    
+                    if result.consensus_facts:
+                        ui.label('Consensus Facts').classes('font-bold mt-2')
+                        for fact in result.consensus_facts[:5]:
+                            ui.label(f"[OK] {fact}").classes('text-sm text-green-600')
+                    
+                    if result.disputed_facts:
+                        ui.label('Disputed Facts').classes('font-bold mt-2')
+                        for fact in result.disputed_facts[:3]:
+                            ui.label(f"[?] {fact}").classes('text-sm text-yellow-600')
+                    
+                    if result.filtered_hallucinations:
+                        ui.label('Filtered (possible hallucinations)').classes('font-bold mt-2')
+                        for h in result.filtered_hallucinations[:3]:
+                            ui.label(f"[X] {h}").classes('text-sm text-red-600')
+            
+            ui.notify('Council complete!', type='positive')
+            
+        except Exception as e:
+            if hasattr(self, '_council_status'):
+                self._council_status.clear()
+                with self._council_status:
+                    ui.label(f"Error: {e}").classes('text-red-500')
+            ui.notify(f"Council error: {e}", type='negative')
+    
+    async def _create_bounty(self, topic: str, reward: float) -> None:
+        """Создать bounty."""
+        if not topic:
+            ui.notify('Enter topic', type='warning')
+            return
+        
+        if not self.cortex:
+            ui.notify('Cortex not available', type='error')
+            return
+        
+        try:
+            bounty = await self.cortex.create_bounty(topic, reward)
+            if bounty:
+                ui.notify(f'Bounty created: {bounty.bounty_id[:16]}...', type='positive')
+                await self._refresh_bounties()
+            else:
+                ui.notify('Failed to create bounty', type='negative')
+        except Exception as e:
+            ui.notify(f"Error: {e}", type='negative')
+    
+    async def _refresh_bounties(self) -> None:
+        """Обновить список bounties."""
+        if not self.cortex:
+            return
+        
+        if hasattr(self, '_bounties_list'):
+            self._bounties_list.clear()
+            
+            try:
+                bounties = await self.cortex.get_open_bounties()
+                
+                with self._bounties_list:
+                    if not bounties:
+                        ui.label('No open bounties').classes('text-gray-500')
+                    else:
+                        for bounty in bounties:
+                            with ui.card().classes('w-full mb-2'):
+                                with ui.row().classes('justify-between items-center'):
+                                    with ui.column():
+                                        ui.label(bounty.topic).classes('font-bold')
+                                        ui.label(f"ID: {bounty.bounty_id[:16]}...").classes('text-xs font-mono')
+                                    
+                                    with ui.column().classes('text-right'):
+                                        ui.badge(f'{bounty.reward:.0f}', color='orange')
+                                        ui.label(bounty.status.value).classes('text-xs')
+                                        
+            except Exception as e:
+                with self._bounties_list:
+                    ui.label(f"Error: {e}").classes('text-red-500')
+    
+    async def _refresh_activity(self) -> None:
+        """Обновить список активности."""
+        if not self.cortex:
+            return
+        
+        if hasattr(self, '_activity_list'):
+            self._activity_list.clear()
+            
+            try:
+                investigations = self.cortex.get_recent_investigations(10)
+                
+                with self._activity_list:
+                    if not investigations:
+                        ui.label('No recent activity').classes('text-gray-500')
+                    else:
+                        for inv in investigations:
+                            with ui.card().classes('w-full mb-2'):
+                                with ui.row().classes('justify-between items-center'):
+                                    with ui.column():
+                                        ui.label(inv.topic).classes('font-bold')
+                                        ui.label(f"ID: {inv.investigation_id}").classes('text-xs font-mono')
+                                    
+                                    status_color = {
+                                        'completed': 'green',
+                                        'failed': 'red',
+                                        'pending': 'yellow',
+                                        'scouting': 'blue',
+                                        'analyzing': 'blue',
+                                        'storing': 'blue',
+                                    }.get(inv.status.value, 'gray')
+                                    
+                                    ui.badge(inv.status.value, color=status_color)
+                                    
+            except Exception as e:
+                with self._activity_list:
+                    ui.label(f"Error: {e}").classes('text-red-500')
+    
+    async def _refresh_neural_graph(self) -> None:
+        """Обновить 3D граф через WebSocket."""
+        if self.visualizer:
+            await self.visualizer._build_graph()
+            ui.notify('Graph refreshed', type='positive')
+        else:
+            ui.notify('Visualizer not available', type='warning')
+    
+    def _setup_websocket_endpoint(self) -> None:
+        """Настроить WebSocket endpoint для визуализации."""
+        if not NICEGUI_AVAILABLE:
+            return
+        
+        visualizer = self.visualizer
+        
+        # NiceGUI использует FastAPI/Starlette под капотом
+        # Добавляем WebSocket endpoint через декоратор app
+        @app.on_startup
+        async def start_visualizer():
+            """Start visualizer when app starts."""
+            if visualizer:
+                try:
+                    await visualizer.start()
+                    logger.info("[WEBUI] Visualizer started")
+                except Exception as e:
+                    logger.warning(f"[WEBUI] Visualizer start error: {e}")
+        
+        # Add API endpoint for graph data using FastAPI route
+        from fastapi import Response
+        import json
+        
+        @app.get('/api/vis/graph')
+        async def api_vis_graph():
+            """API endpoint to get graph data as JSON."""
+            if visualizer:
+                data = visualizer.get_graph_data()
+            else:
+                from .vis_endpoint import generate_demo_graph
+                data = generate_demo_graph()
+            return Response(
+                content=json.dumps(data),
+                media_type="application/json"
+            )
+        
+        logger.info("[WEBUI] Visualization API endpoint /api/vis/graph configured")
+    
     def setup_pages(self) -> None:
         """Настроить все страницы."""
+        # Mount static files for 3D visualization
+        if NICEGUI_AVAILABLE and STATIC_DIR.exists():
+            app.add_static_files('/static', str(STATIC_DIR))
+            logger.info(f"[WEBUI] Static files mounted from {STATIC_DIR}")
+        
         self._create_dashboard_page()
         self._create_peers_page()
         self._create_services_page()
         self._create_ai_page()
+        self._create_cortex_page()
         self._create_dht_page()
         self._create_economy_page()
         self._create_storage_page()
         self._create_compute_page()
         self._create_settings_page()
         self._create_logs_page()
+        self._setup_websocket_endpoint()
     
     def run_sync(self, host: str = "0.0.0.0", port: int = 8080) -> None:
         """
@@ -1169,6 +1748,8 @@ def create_webui(
     ledger=None,
     agent_manager=None,
     kademlia=None,
+    cortex=None,
+    visualizer=None,
     **kwargs,
 ) -> P2PWebUI:
     """
@@ -1179,15 +1760,28 @@ def create_webui(
         ledger: Ledger
         agent_manager: AgentManager
         kademlia: KademliaNode
+        cortex: CortexService
+        visualizer: CortexVisualizer
     
     Returns:
         P2PWebUI instance
     """
+    # Auto-create visualizer if not provided but cortex is available
+    if visualizer is None and cortex is not None:
+        try:
+            from .vis_endpoint import CortexVisualizer
+            visualizer = CortexVisualizer(cortex=cortex, node=node, ledger=ledger)
+            logger.info("[WEBUI] Auto-created CortexVisualizer")
+        except Exception as e:
+            logger.warning(f"[WEBUI] Could not create visualizer: {e}")
+    
     return P2PWebUI(
         node=node,
         ledger=ledger,
         agent_manager=agent_manager,
         kademlia=kademlia,
+        cortex=cortex,
+        visualizer=visualizer,
         **kwargs,
     )
 

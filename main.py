@@ -92,6 +92,13 @@ try:
 except ImportError:
     MONITORING_AVAILABLE = False
 
+# Cortex - Autonomous Knowledge System
+try:
+    from cortex import CortexService, create_cortex_service
+    CORTEX_AVAILABLE = True
+except ImportError:
+    CORTEX_AVAILABLE = False
+
 
 # Настройка логирования
 logging.basicConfig(
@@ -1142,7 +1149,7 @@ Ledger Statistics:
                         
                         # Find full peer_id
                         full_id = None
-                        for p in node.peers.get_all():
+                        for p in node.peer_manager.get_active_peers():
                             if p.node_id.startswith(peer_prefix):
                                 full_id = p.node_id
                                 break
@@ -1424,6 +1431,25 @@ Examples:
     except Exception as e:
         logger.error(f"[DHT] Failed to start: {e}")
     
+    # [CORTEX] Инициализируем Cortex - Автономную Систему Знаний
+    cortex = None
+    if CORTEX_AVAILABLE:
+        try:
+            cortex = create_cortex_service(
+                node=node,
+                ledger=ledger,
+                agent_manager=agent_manager,
+                kademlia=kademlia,
+                enable_automata=True,  # Включаем автономный цикл
+            )
+            await cortex.start()
+            logger.info("[CORTEX] Autonomous Knowledge System started")
+        except Exception as e:
+            logger.warning(f"[CORTEX] Failed to start: {e}")
+            cortex = None
+    else:
+        logger.info("[CORTEX] Not available (module not installed)")
+    
     # Graceful shutdown
     shutdown_event = asyncio.Event()
     
@@ -1449,6 +1475,7 @@ Examples:
                     ledger=ledger,
                     agent_manager=agent_manager,
                     kademlia=kademlia,
+                    cortex=cortex,
                     title=f"P2P Node - {crypto.node_id[:16]}...",
                 )
                 
@@ -1489,7 +1516,7 @@ Examples:
                 port=args.port,
             )
             # Add connected peers to state
-            for peer in node.peers.get_all():
+            for peer in node.peer_manager.get_active_peers():
                 peer_record = PersistentPeerRecord(
                     node_id=peer.node_id,
                     host=peer.host,
@@ -1499,6 +1526,11 @@ Examples:
                 current_state.peers[peer.node_id] = peer_record
             await state_manager.save_state(current_state)
             await state_manager.stop_auto_save()
+        
+        # Stop Cortex
+        if cortex:
+            await cortex.stop()
+            logger.info("[CORTEX] Stopped")
         
         # Stop production modules
         if health_checker:

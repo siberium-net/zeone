@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cortex - Neural Network Visualization</title>
+    
+    <!-- Three.js and 3D Force Graph -->
+    <script src="//unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script src="//unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
+    
+    <style>
+        /* =====================================================
+           CORTEX NEURAL VISUALIZATION - Bio-Cyberpunk Style
+           ===================================================== */
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', 'SF Pro Display', -apple-system, sans-serif;
+            background: #000000;
+            color: #E0E0E0;
+            overflow: hidden;
+        }
+        
+        /* Main container */
+        #neural-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+        
+        /* Header overlay */
+        .header-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 20px 30px;
+            background: linear-gradient(180deg, rgba(0,0,0,0.8) 0%, transparent 100%);
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #00FFFF 0%, #9D4EDD 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: bold;
+            color: #000;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(0, 255, 255, 0.5); }
+            50% { box-shadow: 0 0 40px rgba(0, 255, 255, 0.8); }
+        }
+        
+        .logo-text {
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: 3px;
+            background: linear-gradient(90deg, #00FFFF, #9D4EDD);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .header-stats {
+            display: flex;
+            gap: 30px;
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #00FFFF;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        }
+        
+        .stat-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #888;
+        }
+        
+        /* Legend */
+        .legend {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 20px;
+            z-index: 100;
+        }
+        
+        .legend-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #888;
+            margin-bottom: 15px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            box-shadow: 0 0 8px currentColor;
+        }
+        
+        .legend-label {
+            font-size: 13px;
+            color: #CCC;
+        }
+        
+        /* Info cards */
+        .neural-vis-card {
+            position: absolute;
+            top: 100px;
+            right: 30px;
+            width: 280px;
+            background: rgba(10, 10, 20, 0.9);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            border-radius: 16px;
+            overflow: hidden;
+            z-index: 200;
+            animation: card-appear 0.3s ease-out;
+        }
+        
+        @keyframes card-appear {
+            from {
+                opacity: 0;
+                transform: translateX(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            background: rgba(0, 255, 255, 0.1);
+            border-bottom: 1px solid rgba(0, 255, 255, 0.2);
+        }
+        
+        .role-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            color: #000;
+        }
+        
+        .close-btn {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 24px;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+        
+        .close-btn:hover {
+            color: #FFF;
+        }
+        
+        .card-body {
+            padding: 20px;
+        }
+        
+        .card-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .card-row:last-child {
+            border-bottom: none;
+        }
+        
+        .card-row .label {
+            font-size: 12px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .card-row .value {
+            font-size: 14px;
+            color: #FFF;
+        }
+        
+        .card-row .value.mono {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 12px;
+            color: #00FFFF;
+        }
+        
+        /* Controls */
+        .controls {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 100;
+        }
+        
+        .control-btn {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            color: #00FFFF;
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .control-btn:hover {
+            background: rgba(0, 255, 255, 0.2);
+            border-color: #00FFFF;
+            transform: scale(1.1);
+        }
+        
+        /* Activity log */
+        .activity-log {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 30px;
+            padding: 10px 25px;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            max-width: 600px;
+        }
+        
+        .activity-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #00FF88;
+            animation: blink 1s ease-in-out infinite;
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        
+        .activity-text {
+            font-size: 13px;
+            color: #AAA;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .activity-text strong {
+            color: #00FFFF;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header-stats {
+                display: none;
+            }
+            
+            .legend {
+                bottom: auto;
+                top: 80px;
+                left: 10px;
+                padding: 15px;
+            }
+            
+            .neural-vis-card {
+                width: calc(100% - 20px);
+                right: 10px;
+                left: 10px;
+            }
+            
+            .activity-log {
+                bottom: 10px;
+                width: calc(100% - 20px);
+                max-width: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header-overlay">
+        <div class="logo">
+            <div class="logo-icon">C</div>
+            <span class="logo-text">CORTEX</span>
+        </div>
+        <div class="header-stats">
+            <div class="stat-item">
+                <div class="stat-value" id="stat-nodes">0</div>
+                <div class="stat-label">Nodes</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-active">0</div>
+                <div class="stat-label">Active</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="stat-topics">0</div>
+                <div class="stat-label">Topics</div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Main visualization container -->
+    <div id="neural-container"></div>
+    
+    <!-- Legend -->
+    <div class="legend">
+        <div class="legend-title">Node Types</div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #FFFFFF; color: #FFFFFF;"></div>
+            <span class="legend-label">My Node</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #00FFFF; color: #00FFFF;"></div>
+            <span class="legend-label">Scout (Разведчик)</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #9D4EDD; color: #9D4EDD;"></div>
+            <span class="legend-label">Analyst (Аналитик)</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #FFD700; color: #FFD700;"></div>
+            <span class="legend-label">Librarian (Хранитель)</span>
+        </div>
+    </div>
+    
+    <!-- Controls -->
+    <div class="controls">
+        <button class="control-btn" onclick="resetCamera()" title="Reset View">
+            ⟲
+        </button>
+        <button class="control-btn" onclick="toggleRotation()" title="Toggle Rotation">
+            ◎
+        </button>
+        <button class="control-btn" onclick="triggerPulse()" title="Test Pulse">
+            ⚡
+        </button>
+    </div>
+    
+    <!-- Activity Log -->
+    <div class="activity-log">
+        <div class="activity-indicator"></div>
+        <div class="activity-text" id="activity-text">
+            Initializing neural network...
+        </div>
+    </div>
+    
+    <!-- NeuralVis Script -->
+    <script src="js/NeuralVis.js"></script>
+    
+    <script>
+        // =====================================================
+        // INITIALIZATION
+        // =====================================================
+        
+        let neuralVis = null;
+        let autoRotate = false;
+        let rotationAngle = 0;
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            // Initialize visualization
+            neuralVis = new NeuralVis('neural-container', {
+                wsUrl: `ws://${window.location.host}/ws/vis`,
+                breathingSpeed: 0.003,
+            });
+            
+            // Update stats periodically
+            setInterval(updateStats, 2000);
+            
+            // Activity log messages
+            const activities = [
+                'Scout <strong>scout_1</strong> searching: quantum computing',
+                'Analyst <strong>analyst_1</strong> processing text...',
+                'Librarian <strong>librarian_1</strong> indexing new report',
+                'Council convened for topic: <strong>AI safety</strong>',
+                'Data pulse: <strong>me → scout_1</strong> (15 units)',
+                'New bounty created: <strong>neural interfaces</strong>',
+                'Investigation complete: <strong>blockchain scalability</strong>',
+            ];
+            
+            let activityIdx = 0;
+            setInterval(() => {
+                const activityText = document.getElementById('activity-text');
+                activityText.innerHTML = activities[activityIdx];
+                activityIdx = (activityIdx + 1) % activities.length;
+            }, 4000);
+            
+            // Auto-rotation (optional)
+            function animate() {
+                if (autoRotate && neuralVis && neuralVis.graph) {
+                    rotationAngle += 0.002;
+                    const distance = 300;
+                    neuralVis.graph.cameraPosition({
+                        x: distance * Math.sin(rotationAngle),
+                        y: 100,
+                        z: distance * Math.cos(rotationAngle)
+                    });
+                }
+                requestAnimationFrame(animate);
+            }
+            animate();
+            
+            // Log initialization
+            logActivity('Neural network visualization initialized');
+        });
+        
+        // =====================================================
+        // FUNCTIONS
+        // =====================================================
+        
+        function updateStats() {
+            if (!neuralVis) return;
+            
+            const nodeCount = neuralVis.nodes.size || 10;
+            const activeCount = Math.floor(nodeCount * 0.6);
+            const topicCount = Math.floor(nodeCount * 0.3);
+            
+            document.getElementById('stat-nodes').textContent = nodeCount;
+            document.getElementById('stat-active').textContent = activeCount;
+            document.getElementById('stat-topics').textContent = topicCount;
+        }
+        
+        function resetCamera() {
+            if (neuralVis && neuralVis.graph) {
+                neuralVis.graph.cameraPosition(
+                    { x: 0, y: 0, z: 300 },
+                    { x: 0, y: 0, z: 0 },
+                    1000
+                );
+                rotationAngle = 0;
+            }
+            logActivity('Camera reset to default position');
+        }
+        
+        function toggleRotation() {
+            autoRotate = !autoRotate;
+            logActivity(autoRotate ? 'Auto-rotation enabled' : 'Auto-rotation disabled');
+        }
+        
+        function triggerPulse() {
+            if (neuralVis) {
+                // Random pulse between nodes
+                const nodes = Array.from(neuralVis.nodes.keys());
+                if (nodes.length >= 2) {
+                    const from = nodes[Math.floor(Math.random() * nodes.length)];
+                    let to = nodes[Math.floor(Math.random() * nodes.length)];
+                    while (to === from && nodes.length > 1) {
+                        to = nodes[Math.floor(Math.random() * nodes.length)];
+                    }
+                    neuralVis.pulse(from, to, Math.ceil(Math.random() * 10));
+                    logActivity(`Pulse: <strong>${from}</strong> → <strong>${to}</strong>`);
+                }
+            }
+        }
+        
+        function logActivity(message) {
+            const activityText = document.getElementById('activity-text');
+            activityText.innerHTML = message;
+        }
+        
+        // =====================================================
+        // KEYBOARD SHORTCUTS
+        // =====================================================
+        
+        document.addEventListener('keydown', (e) => {
+            switch(e.key.toLowerCase()) {
+                case 'r':
+                    resetCamera();
+                    break;
+                case 'space':
+                    toggleRotation();
+                    break;
+                case 'p':
+                    triggerPulse();
+                    break;
+            }
+        });
+    </script>
+</body>
+</html>
+
