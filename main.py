@@ -114,16 +114,21 @@ def parse_bootstrap(bootstrap_str: str) -> List[Tuple[str, int]]:
 async def interactive_shell(
     node: Node,
     ledger: Ledger,
-    agent_manager: AgentManager
+    agent_manager: AgentManager,
+    kademlia = None,
 ) -> None:
     """
     Интерактивная оболочка для взаимодействия с узлом.
     """
     print("\n" + "=" * 60)
-    print("P2P Node Interactive Shell (Layer 3: Market)")
+    print("P2P Node Interactive Shell (Layer 3: Market + DHT)")
     print(f"Node ID: {node.node_id[:32]}...")
     print(f"Listening on: {node.host}:{node.port}")
     print(f"Services: {', '.join(agent_manager._agents.keys())}")
+    if kademlia:
+        print(f"DHT: Active (ID: {kademlia.local_id.hex()[:16]}...)")
+    else:
+        print("DHT: Not available")
     print("Type 'help' for commands, 'quit' to exit")
     print("=" * 60 + "\n")
     
@@ -165,6 +170,13 @@ Available commands:
   ask <prompt>           - Ask local Ollama (llm_local service)
   ask <peer_id> <prompt> - Ask peer's LLM service
   models                 - List available Ollama models (local)
+
+[DHT] Distributed Hash Table:
+  dht put <key> <value>  - Store data in DHT
+  dht get <key>          - Retrieve data from DHT
+  dht del <key>          - Delete data from local DHT storage
+  dht info               - Show DHT statistics
+  routing                - Show routing table info
   
 Other:
   id                - Show this node's ID
@@ -522,6 +534,112 @@ Ledger Statistics:
                 except Exception as e:
                     print(f"[ERROR] {e}")
             
+            # [DHT] Distributed Hash Table commands
+            elif cmd == "dht":
+                if not kademlia:
+                    print("[ERROR] DHT not available")
+                    continue
+                
+                if not args:
+                    print("[ERROR] Usage: dht <put|get|del|info> [args]")
+                    continue
+                
+                parts = args.split(maxsplit=2)
+                subcmd = parts[0].lower()
+                
+                if subcmd == "put":
+                    if len(parts) < 3:
+                        print("[ERROR] Usage: dht put <key> <value>")
+                        continue
+                    
+                    key = parts[1]
+                    value = parts[2].encode('utf-8')
+                    
+                    print(f"[DHT] Storing '{key}'...")
+                    try:
+                        count = await kademlia.dht_put(key, value)
+                        print(f"[OK] Stored on {count} nodes")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                elif subcmd == "get":
+                    if len(parts) < 2:
+                        print("[ERROR] Usage: dht get <key>")
+                        continue
+                    
+                    key = parts[1]
+                    
+                    print(f"[DHT] Looking up '{key}'...")
+                    try:
+                        value = await kademlia.dht_get(key)
+                        if value:
+                            try:
+                                text = value.decode('utf-8')
+                                print(f"[OK] Found: {text}")
+                            except UnicodeDecodeError:
+                                print(f"[OK] Found: {value.hex()} ({len(value)} bytes)")
+                        else:
+                            print(f"[WARN] Key '{key}' not found in DHT")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                elif subcmd == "del":
+                    if len(parts) < 2:
+                        print("[ERROR] Usage: dht del <key>")
+                        continue
+                    
+                    key = parts[1]
+                    
+                    try:
+                        deleted = await kademlia.dht_delete(key)
+                        if deleted:
+                            print(f"[OK] Deleted '{key}' from local storage")
+                        else:
+                            print(f"[WARN] Key '{key}' not found locally")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                elif subcmd == "info":
+                    try:
+                        stats = await kademlia.get_full_stats()
+                        print(f"""
+[DHT] Statistics:
+  Local ID: {stats['local_id'][:32]}...
+  Running: {stats['running']}
+
+  Routing Table:
+    Total nodes: {stats['routing_table']['total_nodes']}
+    Non-empty buckets: {stats['routing_table']['non_empty_buckets']}/{stats['routing_table']['total_buckets']}
+    K (bucket size): {stats['routing_table']['k']}
+
+  Storage:
+    Active entries: {stats['storage']['active_entries']}
+    Total size: {stats['storage']['total_size_bytes']} bytes
+""")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                else:
+                    print(f"[ERROR] Unknown DHT command: {subcmd}")
+                    print("  Available: put, get, del, info")
+            
+            elif cmd == "routing":
+                if not kademlia:
+                    print("[ERROR] DHT not available")
+                    continue
+                
+                stats = kademlia.routing_table.get_stats()
+                print(f"""
+[DHT] Routing Table:
+  Local ID: {stats['local_id'][:32]}...
+  Total nodes: {stats['total_nodes']}
+  Non-empty buckets: {stats['non_empty_buckets']}/{stats['total_buckets']}
+  K (bucket size): {stats['k']}
+  
+  Bucket sizes (first 10 non-empty):
+    {stats['bucket_sizes']}
+""")
+            
             else:
                 print(f"[ERROR] Unknown command: {cmd}. Type 'help' for commands.")
                 
@@ -675,6 +793,18 @@ Examples:
     # Запускаем узел
     await node.start()
     
+    # [DHT] Инициализируем Kademlia DHT
+    kademlia = None
+    try:
+        from core.dht.node import KademliaNode
+        kademlia = KademliaNode(node, storage_path=f"dht_{args.port}.db")
+        await kademlia.start()
+        logger.info(f"[DHT] Kademlia started: {kademlia.local_id.hex()[:16]}...")
+    except ImportError as e:
+        logger.warning(f"[DHT] Not available: {e}")
+    except Exception as e:
+        logger.error(f"[DHT] Failed to start: {e}")
+    
     # Graceful shutdown
     shutdown_event = asyncio.Event()
     
@@ -694,8 +824,10 @@ Examples:
             logger.info("[MAIN] Running in daemon mode. Press Ctrl+C to stop.")
             await shutdown_event.wait()
         else:
-            await interactive_shell(node, ledger, agent_manager)
+            await interactive_shell(node, ledger, agent_manager, kademlia)
     finally:
+        if kademlia:
+            await kademlia.stop()
         await node.stop()
         await ledger.close()
         logger.info("[MAIN] Shutdown complete")
