@@ -171,6 +171,14 @@ Available commands:
   ask <peer_id> <prompt> - Ask peer's LLM service
   models                 - List available Ollama models (local)
 
+[DISTRIBUTED AI] Distributed Inference:
+  dist generate <prompt> - Generate using distributed pipeline
+  dist models            - List available distributed models
+  dist shards            - Show local model shards
+  dist load <model> <start> <end> - Load model shard (mock)
+  dist unload            - Unload current shard
+  dist status            - Show distributed inference status
+
 [DHT] Distributed Hash Table:
   dht put <key> <value>  - Store data in DHT
   dht get <key>          - Retrieve data from DHT
@@ -540,6 +548,169 @@ Ledger Statistics:
                         print("[WARN] No models found or Ollama offline")
                 except Exception as e:
                     print(f"[ERROR] {e}")
+            
+            # [DISTRIBUTED AI] Distributed Inference commands
+            elif cmd == "dist":
+                if not args:
+                    print("[ERROR] Usage: dist <generate|models|shards|load|unload|status> [args]")
+                    continue
+                
+                parts = args.split(maxsplit=2)
+                subcmd = parts[0].lower()
+                
+                # Получаем distributed компоненты (если доступны)
+                dist_client = getattr(node, '_dist_client', None)
+                dist_worker = getattr(node, '_dist_worker', None)
+                dist_registry = getattr(node, '_dist_registry', None)
+                
+                if subcmd == "generate":
+                    prompt = parts[1] if len(parts) > 1 else ""
+                    if not prompt:
+                        print("[ERROR] Usage: dist generate <prompt>")
+                        continue
+                    
+                    if not dist_client:
+                        # Fallback на локальный Ollama
+                        print("[INFO] Distributed client not available, using local Ollama")
+                        ollama_agent = agent_manager._agents.get("llm_local")
+                        if ollama_agent:
+                            print(f"[AI] Generating with local Ollama...")
+                            result, cost, error = await ollama_agent.execute({"prompt": prompt})
+                            if error:
+                                print(f"[ERROR] {error}")
+                            else:
+                                print(f"\n[RESPONSE]\n{result.get('response', '')}")
+                                print(f"\n[INFO] Tokens: {result.get('eval_count', 0)}, Cost: {cost:.2f}")
+                        else:
+                            print("[ERROR] No inference backend available")
+                        continue
+                    
+                    print(f"[DIST] Generating with distributed pipeline...")
+                    try:
+                        result = await dist_client.generate(
+                            model="qwen2.5-32b",
+                            prompt=prompt,
+                            max_tokens=100,
+                        )
+                        if result.success:
+                            print(f"\n[RESPONSE]\n{result.text}")
+                            print(f"\n[INFO] Model: {result.model_used}")
+                            print(f"       Tokens: {result.tokens_generated}")
+                            print(f"       Speed: {result.tokens_per_second:.1f} t/s")
+                            print(f"       Distributed: {result.distributed}")
+                            if result.distributed:
+                                print(f"       Shards: {result.shards_used}")
+                        else:
+                            print(f"[ERROR] {result.error}")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                elif subcmd == "models":
+                    print("[DIST] Known distributed models:")
+                    try:
+                        from agents.distributed.registry import KNOWN_MODELS
+                        for name, info in KNOWN_MODELS.items():
+                            print(f"  - {name}")
+                            print(f"      Layers: {info.total_layers}")
+                            print(f"      Params: {info.total_params_b}B")
+                            print(f"      Shards: {info.recommended_shards}")
+                            print(f"      Memory/shard: {info.memory_per_shard_gb}GB")
+                    except ImportError:
+                        print("[ERROR] Distributed module not available")
+                
+                elif subcmd == "shards":
+                    if dist_registry:
+                        shards = dist_registry.get_local_shards()
+                        if shards:
+                            print(f"[DIST] Local shards ({len(shards)}):")
+                            for s in shards:
+                                print(f"  - {s.model_name} layers {s.layer_start}-{s.layer_end}")
+                                print(f"      Status: {s.status.value}")
+                                print(f"      Memory: {s.gpu_memory_mb}MB")
+                        else:
+                            print("[INFO] No local shards loaded")
+                    else:
+                        print("[INFO] No shards loaded (registry not initialized)")
+                
+                elif subcmd == "load":
+                    if len(parts) < 4:
+                        print("[ERROR] Usage: dist load <model> <layer_start> <layer_end>")
+                        print("        Example: dist load qwen2.5-32b 0 16")
+                        continue
+                    
+                    model_name = parts[1]
+                    try:
+                        # Парсим layer_start и layer_end из оставшихся аргументов
+                        remaining = parts[2] if len(parts) > 2 else ""
+                        layer_parts = remaining.split()
+                        if len(layer_parts) < 2:
+                            print("[ERROR] Usage: dist load <model> <layer_start> <layer_end>")
+                            continue
+                        layer_start = int(layer_parts[0])
+                        layer_end = int(layer_parts[1])
+                    except ValueError:
+                        print("[ERROR] layer_start and layer_end must be integers")
+                        continue
+                    
+                    print(f"[DIST] Loading shard: {model_name} layers {layer_start}-{layer_end}")
+                    print("       (Using mock shard for demo)")
+                    
+                    try:
+                        from agents.distributed.worker import InferenceWorker
+                        from agents.distributed.registry import ModelRegistry
+                        
+                        # Инициализируем worker если нужно
+                        if not dist_worker:
+                            dist_registry = ModelRegistry()
+                            dist_worker = InferenceWorker(
+                                node_id=node.node_id,
+                                registry=dist_registry,
+                                host=node.host,
+                                port=node.port,
+                            )
+                            node._dist_worker = dist_worker
+                            node._dist_registry = dist_registry
+                        
+                        success = await dist_worker.load_shard(
+                            model_name=model_name,
+                            layer_start=layer_start,
+                            layer_end=layer_end,
+                            use_mock=True,  # Mock для demo
+                        )
+                        
+                        if success:
+                            await dist_worker.start()
+                            print(f"[OK] Shard loaded and worker started")
+                            print(f"     Shard ID: {dist_worker.current_shard_id}")
+                        else:
+                            print("[ERROR] Failed to load shard")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                elif subcmd == "unload":
+                    if dist_worker:
+                        await dist_worker.unload_shard()
+                        print("[OK] Shard unloaded")
+                    else:
+                        print("[INFO] No shard loaded")
+                
+                elif subcmd == "status":
+                    print("[DIST] Distributed Inference Status:")
+                    print(f"  Client: {'Active' if dist_client else 'Not initialized'}")
+                    print(f"  Worker: {'Active' if dist_worker else 'Not initialized'}")
+                    print(f"  Registry: {'Active' if dist_registry else 'Not initialized'}")
+                    
+                    if dist_worker:
+                        stats = dist_worker.get_stats()
+                        print(f"\n  Worker State: {stats.get('state', 'Unknown')}")
+                        if stats.get('shard'):
+                            shard = stats['shard']
+                            print(f"  Shard: {shard.get('shard_id', 'None')}")
+                            print(f"  Loaded: {shard.get('is_loaded', False)}")
+                            print(f"  Memory: {shard.get('memory_mb', 0)}MB")
+                            print(f"  Requests: {shard.get('total_requests', 0)}")
+                else:
+                    print("[ERROR] Unknown subcommand. Use: generate, models, shards, load, unload, status")
             
             # [DHT] Distributed Hash Table commands
             elif cmd == "dht":

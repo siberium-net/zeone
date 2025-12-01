@@ -24,3 +24,6 @@ aiosqlite
 
 # Sandbox for contracts (optional)
 RestrictedPython
+
+# Distributed AI Inference
+numpy>=1.24.0

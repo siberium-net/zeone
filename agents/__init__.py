@@ -8,6 +8,7 @@ Agents Module (Layer 3: Market)
 - ReaderAgent: чтение веб-страниц
 - LlmAgent: облачный LLM (OpenAI-compatible)
 - OllamaAgent: локальный LLM (Ollama/GPU)
+- DistributedLlmAgent: распределённый инференс через P2P
 
 Sandbox:
 - Contract: исполняемый код в песочнице
@@ -51,6 +52,15 @@ except ImportError:
     OllamaAgent = None  # type: ignore
     _OLLAMA_AVAILABLE = False
 
+# Distributed LLM Agent - требует numpy
+try:
+    from .distributed_agent import DistributedLlmAgent, ShardProviderAgent
+    _DISTRIBUTED_AVAILABLE = True
+except ImportError:
+    DistributedLlmAgent = None  # type: ignore
+    ShardProviderAgent = None  # type: ignore
+    _DISTRIBUTED_AVAILABLE = False
+
 __all__ = [
     "AgentManager",
     "BaseAgent",
@@ -60,6 +70,8 @@ __all__ = [
     "ReaderAgent",
     "LlmAgent",
     "OllamaAgent",
+    "DistributedLlmAgent",
+    "ShardProviderAgent",
     "ServiceRequest",
     "ServiceResponse",
     "Contract",
