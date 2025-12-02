@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple, Any
 from pathlib import Path
 
-import aiosqlite
+from core.utils.async_db import connect as async_connect
 
 logger = logging.getLogger(__name__)
 
@@ -113,23 +113,32 @@ class DHTStorage:
     - ttl: INTEGER
     """
     
-    def __init__(self, db_path: str = "dht_storage.db"):
+    def __init__(self, db_path: str = "dht_storage.db", use_memory: bool = False):
         """
         Args:
             db_path: Путь к файлу базы данных
+            use_memory: Использовать in-memory backend (без sqlite)
         """
         self.db_path = db_path
-        self._db: Optional[aiosqlite.Connection] = None
+        self._db = None  # type: ignore
         self._lock = asyncio.Lock()
         self._initialized = False
+        self._memory = use_memory or db_path == ":memory:"
+        self._mem_store: Dict[bytes, StoredValue] = {}
     
     async def initialize(self) -> None:
         """Инициализировать хранилище и создать таблицы."""
         if self._initialized:
             return
         
-        self._db = await aiosqlite.connect(self.db_path)
-        self._db.row_factory = aiosqlite.Row
+        if self._memory:
+            self._initialized = True
+            return
+        
+        self._db = await async_connect(self.db_path)
+        # sqlite3 Row factory for dict-like access
+        import sqlite3
+        self._db.row_factory = sqlite3.Row
         
         # Создаём таблицу для DHT
         await self._db.execute("""
@@ -162,6 +171,10 @@ class DHTStorage:
     
     async def close(self) -> None:
         """Закрыть соединение с базой данных."""
+        if self._memory:
+            self._initialized = False
+            self._mem_store.clear()
+            return
         if self._db:
             await self._db.close()
             self._db = None
@@ -205,6 +218,16 @@ class DHTStorage:
         
         async with self._lock:
             try:
+                if self._memory:
+                    self._mem_store[key] = StoredValue(
+                        key=key,
+                        value=value,
+                        publisher_id=publisher_id,
+                        timestamp=time.time(),
+                        ttl=ttl,
+                    )
+                    return True
+                
                 await self._db.execute(
                     """
                     INSERT OR REPLACE INTO dht_store 
@@ -236,6 +259,15 @@ class DHTStorage:
             return None
         
         async with self._lock:
+            if self._memory:
+                stored = self._mem_store.get(key)
+                if not stored:
+                    return None
+                if stored.is_expired:
+                    self._mem_store.pop(key, None)
+                    return None
+                return stored
+            
             cursor = await self._db.execute(
                 "SELECT * FROM dht_store WHERE key = ?",
                 (key,)
@@ -273,6 +305,8 @@ class DHTStorage:
             True если удалено
         """
         async with self._lock:
+            if self._memory:
+                return self._mem_store.pop(key, None) is not None
             cursor = await self._db.execute(
                 "DELETE FROM dht_store WHERE key = ?",
                 (key,)
@@ -288,6 +322,12 @@ class DHTStorage:
     async def get_all_keys(self) -> List[bytes]:
         """Получить все ключи (не истёкшие)."""
         async with self._lock:
+            if self._memory:
+                now = time.time()
+                return [
+                    key for key, value in self._mem_store.items()
+                    if now < value.expires_at
+                ]
             now = time.time()
             cursor = await self._db.execute(
                 "SELECT key FROM dht_store WHERE timestamp + ttl > ?",
@@ -311,6 +351,12 @@ class DHTStorage:
             Список StoredValue для republish
         """
         async with self._lock:
+            if self._memory:
+                now = time.time()
+                return [
+                    value for value in self._mem_store.values()
+                    if not value.is_expired and (now - value.timestamp) > interval
+                ]
             now = time.time()
             threshold = now - interval
             
@@ -338,6 +384,10 @@ class DHTStorage:
     async def mark_republished(self, key: bytes) -> None:
         """Отметить ключ как republished."""
         async with self._lock:
+            if self._memory:
+                if key in self._mem_store:
+                    self._mem_store[key].timestamp = time.time()
+                return
             await self._db.execute(
                 "UPDATE dht_store SET last_republish = ? WHERE key = ?",
                 (time.time(), key)
@@ -352,6 +402,12 @@ class DHTStorage:
             Количество удалённых записей
         """
         async with self._lock:
+            if self._memory:
+                now = time.time()
+                to_delete = [k for k, v in self._mem_store.items() if v.expires_at <= now]
+                for key in to_delete:
+                    self._mem_store.pop(key, None)
+                return len(to_delete)
             now = time.time()
             cursor = await self._db.execute(
                 "DELETE FROM dht_store WHERE timestamp + ttl <= ?",
@@ -369,6 +425,18 @@ class DHTStorage:
         """Получить статистику хранилища."""
         async with self._lock:
             now = time.time()
+            
+            if self._memory:
+                active_entries = len([v for v in self._mem_store.values() if not v.is_expired])
+                total_size = sum(len(v.value) for v in self._mem_store.values())
+                return {
+                    "total_entries": len(self._mem_store),
+                    "active_entries": active_entries,
+                    "expired_entries": len(self._mem_store) - active_entries,
+                    "total_size_bytes": total_size,
+                    "db_path": self.db_path,
+                    "memory": True,
+                }
             
             # Общее количество записей
             cursor = await self._db.execute("SELECT COUNT(*) as count FROM dht_store")
@@ -396,6 +464,7 @@ class DHTStorage:
                 "expired_entries": total - active,
                 "total_size_bytes": total_size,
                 "db_path": self.db_path,
+                "memory": False,
             }
     
     async def get_local_values_for_node(self, node_id: bytes, count: int = 10) -> List[StoredValue]:
@@ -455,4 +524,3 @@ def bytes_to_key(data: bytes) -> bytes:
         20-байтный SHA-1 хэш
     """
     return hashlib.sha1(data).digest()
-

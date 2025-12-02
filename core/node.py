@@ -323,6 +323,10 @@ class Node:
         # Фоновые задачи
         self._tasks: Set[asyncio.Task] = set()
         
+        # DHT integration
+        self._pending_dht_requests: Dict[str, asyncio.Future] = {}
+        self._dht_request_handler: Optional[Callable[[Dict[str, Any], "Peer"], Awaitable[Optional[Dict[str, Any]]]]] = None
+        
         # Callbacks
         self._on_peer_connected: List[Callable[[Peer], Awaitable[None]]] = []
         self._on_peer_disconnected: List[Callable[[Peer], Awaitable[None]]] = []
@@ -364,8 +368,11 @@ class Node:
             reuse_address=True,
         )
         
-        addr = self._server.sockets[0].getsockname()
-        logger.info(f"[NODE] Server listening on {addr[0]}:{addr[1]}")
+        if self._server.sockets:
+            addr = self._server.sockets[0].getsockname()
+            logger.info(f"[NODE] Server listening on {addr[0]}:{addr[1]}")
+        else:
+            logger.warning("[NODE] Server started without sockets (restricted environment)")
         
         # Запускаем фоновые задачи
         self._tasks.add(asyncio.create_task(self._heartbeat_loop()))
@@ -442,11 +449,22 @@ class Node:
         
         Это гарантирует, что пир владеет заявленным ключом.
         """
+        return await self._connect_with_streams(host, port)
+
+    async def _connect_with_streams(
+        self,
+        host: str,
+        port: int,
+        reader: Optional[asyncio.StreamReader] = None,
+        writer: Optional[asyncio.StreamWriter] = None,
+    ) -> Optional[Peer]:
+        """Внутренний метод подключения с уже созданными потоками (для тестов/ин-мемори)."""
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port),
-                timeout=config.network.connection_timeout,
-            )
+            if reader is None or writer is None:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=config.network.connection_timeout,
+                )
         except (OSError, asyncio.TimeoutError) as e:
             logger.debug(f"[NODE] Connection to {host}:{port} failed: {e}")
             return None
@@ -657,6 +675,10 @@ class Node:
                 
                 # Обновляем last_seen
                 peer.last_seen = time.time()
+                
+                # DHT request/response handling
+                if await self._handle_dht_payload(peer, message):
+                    continue
                 
                 # [ECONOMY] Обработка BALANCE_CLAIM
                 if message.type == MessageType.BALANCE_CLAIM:
@@ -913,6 +935,73 @@ class Node:
         """
         self._on_service_response.append(callback)
     
+    # ---------------------------------------------------------------------
+    # DHT integration hooks
+    # ---------------------------------------------------------------------
+
+    def set_dht_handler(self, handler: Callable[[Dict[str, Any], Peer], Awaitable[Optional[Dict[str, Any]]]]) -> None:
+        """Установить обработчик DHT payload (используется KademliaNode)."""
+        self._dht_request_handler = handler
+    
+    async def _handle_dht_payload(self, peer: Peer, message: Message) -> bool:
+        """
+        Обработать DHT запрос/ответ инкапсулированный в DATA.
+        
+        Returns:
+            True если сообщение обработано как DHT.
+        """
+        if message.type != MessageType.DATA:
+            return False
+        
+        if not isinstance(message.payload, dict):
+            return False
+        
+        if not message.payload.get("dht"):
+            return False
+        
+        if not self.crypto.verify_signature(message):
+            logger.warning(f"[NODE] Dropping unsigned DHT payload from {peer.node_id[:8]}...")
+            return True
+        
+        nonce = message.payload.get("nonce")
+        
+        # Ответ на наш запрос
+        if "dht_response" in message.payload and nonce:
+            future = self._pending_dht_requests.pop(nonce, None)
+            if future and not future.done():
+                future.set_result(message.payload["dht_response"])
+            return True
+        
+        # Входящий запрос
+        if "dht_request" in message.payload and self._dht_request_handler:
+            try:
+                response_payload = await self._dht_request_handler(
+                    message.payload["dht_request"],
+                    peer,
+                )
+            except Exception as e:
+                logger.warning(f"[NODE] DHT handler error from {peer.node_id[:8]}...: {e}")
+                response_payload = None
+            
+            if response_payload is not None:
+                response = Message(
+                    type=MessageType.DATA,
+                    payload={
+                        "dht": True,
+                        "dht_response": response_payload,
+                        "nonce": nonce,
+                    },
+                    sender_id=self.node_id,
+                )
+                signed = self.crypto.sign_message(response)
+                if self.ledger:
+                    await peer.send_with_accounting(signed, self.ledger, self.use_masking)
+                else:
+                    await peer.send(signed, self.use_masking)
+            return True
+        
+        return False
+    
     def set_ledger(self, ledger: "Ledger") -> None:
         """
         Установить Ledger для учета трафика.
@@ -1109,4 +1198,3 @@ class UDPDiscoveryProtocol(asyncio.DatagramProtocol):
                 )
         except Exception:
             pass
-

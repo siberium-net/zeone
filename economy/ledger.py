@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
-import aiosqlite
+from core.utils.async_db import connect as async_connect
 
 from config import config
 
@@ -277,8 +277,9 @@ class Ledger:
     ):
         self.db_path = db_path
         self.debt_limit = debt_limit  # Лимит долга в байтах
-        self._db: Optional[aiosqlite.Connection] = None
+        self._db: Optional[Any] = None
         self._lock = asyncio.Lock()
+        self._memory = db_path == ":memory:"
         
         # Кэш балансов для быстрого доступа (peer_id -> balance)
         self._balance_cache: Dict[str, float] = {}
@@ -290,7 +291,11 @@ class Ledger:
         
         Создает таблицы если они не существуют.
         """
-        self._db = await aiosqlite.connect(self.db_path)
+        if self._memory:
+            self._cache_valid = True
+            return
+        
+        self._db = await async_connect(self.db_path)
         
         # Включаем WAL mode для лучшей производительности
         await self._db.execute("PRAGMA journal_mode=WAL")
@@ -416,6 +421,10 @@ class Ledger:
             Новый баланс с этим пиром
         """
         async with self._lock:
+            if self._memory:
+                new_balance = self._balance_cache.get(peer_id, 0.0) - amount
+                self._balance_cache[peer_id] = new_balance
+                return new_balance
             # Получаем или создаем запись баланса
             cursor = await self._db.execute(
                 "SELECT balance, total_received FROM balances WHERE peer_id = ?",
@@ -494,6 +503,10 @@ class Ledger:
             Новый баланс с этим пиром
         """
         async with self._lock:
+            if self._memory:
+                new_balance = self._balance_cache.get(peer_id, 0.0) + amount
+                self._balance_cache[peer_id] = new_balance
+                return new_balance
             # Получаем или создаем запись баланса
             cursor = await self._db.execute(
                 "SELECT balance, total_sent FROM balances WHERE peer_id = ?",
@@ -570,6 +583,9 @@ class Ledger:
         if self._cache_valid and peer_id in self._balance_cache:
             return self._balance_cache[peer_id]
         
+        if self._memory:
+            return self._balance_cache.get(peer_id, 0.0)
+        
         # Иначе запрашиваем из БД
         cursor = await self._db.execute(
             "SELECT balance FROM balances WHERE peer_id = ?",
@@ -588,6 +604,15 @@ class Ledger:
         Returns:
             Dict с balance, total_sent, total_received, last_updated
         """
+        if self._memory:
+            balance = self._balance_cache.get(peer_id, 0.0)
+            return {
+                "peer_id": peer_id,
+                "balance": balance,
+                "total_sent": 0.0,
+                "total_received": 0.0,
+                "last_updated": None,
+            }
         cursor = await self._db.execute(
             "SELECT balance, total_sent, total_received, last_updated FROM balances WHERE peer_id = ?",
             (peer_id,)
@@ -613,6 +638,16 @@ class Ledger:
     
     async def get_all_balances(self) -> List[Dict[str, Any]]:
         """Получить балансы со всеми пирами."""
+        if self._memory:
+            return [
+                {
+                    "peer_id": pid,
+                    "balance": bal,
+                    "total_sent": 0.0,
+                    "total_received": 0.0,
+                }
+                for pid, bal in self._balance_cache.items()
+            ]
         cursor = await self._db.execute(
             "SELECT peer_id, balance, total_sent, total_received FROM balances ORDER BY balance DESC"
         )
@@ -652,7 +687,10 @@ class Ledger:
         Returns:
             (can_send, reason)
         """
-        balance = await self.get_balance(peer_id)
+        if self._memory:
+            balance = self._balance_cache.get(peer_id, 0.0)
+        else:
+            balance = await self.get_balance(peer_id)
         
         if balance > self.debt_limit:
             return (
@@ -667,12 +705,15 @@ class Ledger:
         Сбросить баланс с пиром (после погашения долга).
         """
         async with self._lock:
-            await self._db.execute(
-                "UPDATE balances SET balance = 0, last_updated = ? WHERE peer_id = ?",
-                (time.time(), peer_id)
-            )
-            await self._db.commit()
-            self._balance_cache[peer_id] = 0.0
+            if self._memory:
+                self._balance_cache[peer_id] = 0.0
+            else:
+                await self._db.execute(
+                    "UPDATE balances SET balance = 0, last_updated = ? WHERE peer_id = ?",
+                    (time.time(), peer_id)
+                )
+                await self._db.commit()
+                self._balance_cache[peer_id] = 0.0
     
     # =========================================================================
     # HANDSHAKE BALANCE EXCHANGE - Обмен балансом при соединении
@@ -765,6 +806,21 @@ class Ledger:
         [DECENTRALIZATION] Новые пиры начинают с базовым Trust Score.
         Репутация строится со временем.
         """
+        if self._memory:
+            existing = self._balance_cache.get(node_id)
+            if existing is None:
+                self._balance_cache[node_id] = 0.0
+            now = time.time()
+            return {
+                "node_id": node_id,
+                "public_key": public_key,
+                "trust_score": config.ledger.initial_trust_score,
+                "total_sent": 0,
+                "total_received": 0,
+                "first_seen": now,
+                "last_seen": now,
+                "metadata": {},
+            }
         async with self._lock:
             cursor = await self._db.execute(
                 "SELECT * FROM peers WHERE node_id = ?",
@@ -816,6 +872,8 @@ class Ledger:
         Returns:
             Новый Trust Score
         """
+        if self._memory:
+            return config.ledger.initial_trust_score
         async with self._lock:
             # Получаем текущий score
             cursor = await self._db.execute(
@@ -841,6 +899,8 @@ class Ledger:
     
     async def get_trust_score(self, node_id: str) -> float:
         """Получить Trust Score пира."""
+        if self._memory:
+            return config.ledger.initial_trust_score
         cursor = await self._db.execute(
             "SELECT trust_score FROM peers WHERE node_id = ?",
             (node_id,)
@@ -850,6 +910,8 @@ class Ledger:
     
     async def get_peers_by_trust(self, min_score: float = 0.0, limit: int = 100) -> List[Dict[str, Any]]:
         """Получить пиров с Trust Score выше порога."""
+        if self._memory:
+            return []
         cursor = await self._db.execute(
             """
             SELECT node_id, trust_score, last_seen 

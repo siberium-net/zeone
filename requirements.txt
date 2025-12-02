@@ -42,3 +42,7 @@ nicegui>=1.4.0
 
 # [PRODUCTION] System monitoring
 psutil>=5.9.0
+
+# Testing
+pytest
+pytest-asyncio

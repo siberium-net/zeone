@@ -25,6 +25,7 @@ from .routing import (
     xor_distance, key_to_id,
 )
 from .storage import DHTStorage, StoredValue, DEFAULT_TTL
+from config import config
 
 if TYPE_CHECKING:
     from core.transport import Message, Crypto
@@ -360,7 +361,7 @@ class DHTProtocol:
         else:
             return StoreResponse(success=False, error="Storage failed")
     
-    def handle_message(self, payload: Dict) -> Optional[Dict]:
+    async def handle_message(self, payload: Dict) -> Optional[Dict]:
         """
         Обработать входящее DHT сообщение.
         
@@ -374,18 +375,18 @@ class DHTProtocol:
         
         if msg_type == "FIND_NODE":
             request = FindNodeRequest.from_dict(payload)
-            response = asyncio.create_task(self.handle_find_node(request))
-            # Note: В реальном коде нужен await, но здесь синхронный интерфейс
-            return None
+            response = await self.handle_find_node(request)
+            return response.to_dict()
         
-        elif msg_type == "FIND_VALUE":
+        if msg_type == "FIND_VALUE":
             request = FindValueRequest.from_dict(payload)
-            # Аналогично
-            return None
+            response = await self.handle_find_value(request)
+            return response.to_dict()
         
-        elif msg_type == "STORE":
+        if msg_type == "STORE":
             request = StoreRequest.from_dict(payload)
-            return None
+            response = await self.handle_store(request)
+            return response.to_dict()
         
         return None
     
@@ -655,7 +656,10 @@ class DHTProtocol:
     ) -> Optional[FindNodeResponse]:
         """Отправить FIND_NODE запрос."""
         try:
-            response_data = await send_func(node, request.to_dict())
+            response_data = await asyncio.wait_for(
+                send_func(node, request.to_dict()),
+                timeout=config.network.rpc_timeout,
+            )
             if response_data:
                 return FindNodeResponse.from_dict(response_data)
         except Exception as e:
@@ -671,7 +675,10 @@ class DHTProtocol:
     ) -> Optional[FindValueResponse]:
         """Отправить FIND_VALUE запрос."""
         try:
-            response_data = await send_func(node, request.to_dict())
+            response_data = await asyncio.wait_for(
+                send_func(node, request.to_dict()),
+                timeout=config.network.rpc_timeout,
+            )
             if response_data:
                 return FindValueResponse.from_dict(response_data)
         except Exception as e:
@@ -687,7 +694,10 @@ class DHTProtocol:
     ) -> Optional[StoreResponse]:
         """Отправить STORE запрос."""
         try:
-            response_data = await send_func(node, request.to_dict())
+            response_data = await asyncio.wait_for(
+                send_func(node, request.to_dict()),
+                timeout=config.network.rpc_timeout,
+            )
             if response_data:
                 return StoreResponse.from_dict(response_data)
         except Exception as e:
@@ -737,4 +747,3 @@ class StoreHandler:
         request = StoreRequest.from_dict(payload)
         response = await self.dht_protocol.handle_store(request)
         return response.to_dict()
-

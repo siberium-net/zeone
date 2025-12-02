@@ -18,6 +18,8 @@ import asyncio
 import time
 import hashlib
 import logging
+import base64
+import os
 from typing import Optional, Dict, List, Any, Tuple, TYPE_CHECKING
 from pathlib import Path
 
@@ -33,6 +35,7 @@ from .protocol import (
     FindValueRequest, FindValueResponse,
     StoreRequest, StoreResponse,
 )
+from config import config
 
 if TYPE_CHECKING:
     from core.node import Node, Peer
@@ -77,6 +80,7 @@ class KademliaNode:
         self,
         base_node: 'Node',
         storage_path: str = "dht_storage.db",
+        use_memory_storage: bool = False,
     ):
         """
         Args:
@@ -85,13 +89,14 @@ class KademliaNode:
         """
         self.base_node = base_node
         self.storage_path = storage_path
+        self._use_memory_storage = use_memory_storage
         
         # Конвертируем node_id из hex строки в bytes (20 байт)
         self.local_id = self._node_id_to_bytes(base_node.node_id)
         
         # Инициализируем компоненты Kademlia
         self.routing_table = RoutingTable(self.local_id, k=K)
-        self.storage = DHTStorage(storage_path)
+        self.storage = DHTStorage(storage_path, use_memory=self._use_memory_storage)
         
         # DHT Protocol
         self.protocol: Optional[DHTProtocol] = None
@@ -180,9 +185,8 @@ class KademliaNode:
     
     def _register_handlers(self) -> None:
         """Зарегистрировать обработчики DHT сообщений."""
-        # В реальной реализации здесь нужно добавить обработчики
-        # в ProtocolRouter базового узла. Пока используем упрощённый подход.
-        pass
+        # Передаем DHT payload обработчику базового узла
+        self.base_node.set_dht_handler(self._handle_dht_request)
     
     async def _on_peer_connected(self, peer: 'Peer') -> None:
         """Callback при подключении нового пира."""
@@ -393,30 +397,54 @@ class KademliaNode:
         # Создаём DHT сообщение
         from core.transport import Message, MessageType
         
+        nonce = base64.b64encode(os.urandom(12)).decode("ascii")
+        
         message = Message(
             type=MessageType.DATA,  # Используем DATA с DHT payload
             payload={
                 "dht": True,
                 "dht_request": request,
+                "nonce": nonce,
             },
             sender_id=self.base_node.node_id,
+            nonce=nonce,
         )
+        signed_message = self.base_node.crypto.sign_message(message)
         
-        # Отправляем и ждём ответ
-        # TODO: Реализовать request-response паттерн
-        # Пока используем упрощённый подход
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future = loop.create_future()
+        self.base_node._pending_dht_requests[nonce] = future
+        
         try:
-            success = await peer.send(message)
-            if success:
-                node.touch()
-                # В реальной реализации нужно ждать ответ
-                # Пока возвращаем None (ответ придёт асинхронно)
+            success = await peer.send(signed_message)
+            if not success:
+                node.mark_failed()
                 return None
+            
+            response_data = await asyncio.wait_for(
+                future,
+                timeout=config.network.rpc_timeout,
+            )
+            node.touch()
+            return response_data
+        except asyncio.TimeoutError:
+            logger.debug(f"[KADEMLIA] DHT RPC to {node.host}:{node.port} timed out")
+            node.mark_failed()
+            return None
         except Exception as e:
             logger.debug(f"[KADEMLIA] Send failed: {e}")
             node.mark_failed()
-        
-        return None
+            return None
+        finally:
+            self.base_node._pending_dht_requests.pop(nonce, None)
+            if not future.done():
+                future.cancel()
+
+    async def _handle_dht_request(self, request: Dict, peer: 'Peer') -> Optional[Dict]:
+        """Входящий DHT запрос от базового узла."""
+        if not self.protocol:
+            return None
+        return await self.protocol.handle_message(request)
     
     # =========================================================================
     # Background Tasks
@@ -555,4 +583,3 @@ class KademliaNode:
         logger.info(f"[KADEMLIA] Bootstrap complete: added {added} nodes")
         
         return added
-

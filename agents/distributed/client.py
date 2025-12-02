@@ -576,8 +576,9 @@ class DistributedInferenceClient:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 200:
                             result["ollama_available"] = True
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"[CLIENT] Ollama availability check failed: {e}")
+                result["ollama_available"] = False
         
         return result
     
@@ -619,4 +620,3 @@ async def distributed_generate(
         registry=registry,
     )
     return await client.generate(model, prompt, **kwargs)
-

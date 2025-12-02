@@ -30,6 +30,9 @@ class NetworkConfig:
     # Таймаут подключения (секунды)
     connection_timeout: float = 10.0
     
+    # Таймаут RPC запросов (секунды)
+    rpc_timeout: float = 5.0
+    
     # Интервал heartbeat для проверки живости пиров (секунды)
     heartbeat_interval: float = 30.0
     
@@ -154,4 +157,3 @@ class Config:
 
 # Глобальный экземпляр конфигурации
 config = Config()
-
