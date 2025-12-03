@@ -280,6 +280,8 @@ class Ledger:
         self._db: Optional[Any] = None
         self._lock = asyncio.Lock()
         self._memory = db_path == ":memory:"
+        if self._memory:
+            self._knowledge_mem: List[Dict[str, Any]] = []
         
         # Кэш балансов для быстрого доступа (peer_id -> balance)
         self._balance_cache: Dict[str, float] = {}
@@ -377,6 +379,20 @@ class Ledger:
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_iou_creditor ON ious(creditor_id)"
         )
+        
+        # Knowledge base
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_base (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cid TEXT,
+                path TEXT,
+                summary TEXT,
+                tags TEXT,
+                created_at REAL,
+                size INTEGER,
+                metadata TEXT
+            )
+        """)
         
         await self._db.commit()
         
@@ -563,6 +579,62 @@ class Ledger:
             
             logger.debug(f"[LEDGER] Recorded claim from {peer_id[:8]}...: {amount} bytes, balance: {new_balance}")
             return new_balance
+
+    async def record_payment(self, peer_id: str, amount: float, tx_hash: str = "") -> float:
+        """
+        Записать оплату токенами (settlement).
+        Увеличивает наш баланс (мы меньше должны).
+        """
+        async with self._lock:
+            current = await self.get_balance(peer_id)
+            new_balance = current + amount
+            await self._db.execute(
+                """
+                INSERT OR IGNORE INTO transactions 
+                (id, from_id, to_id, amount, timestamp, signature, tx_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"settlement-{tx_hash}",
+                    "self",
+                    peer_id,
+                    amount,
+                    time.time(),
+                    tx_hash,
+                    "settlement",
+                ),
+            )
+            await self._db.execute(
+                """
+                INSERT OR IGNORE INTO transactions 
+                (id, from_id, to_id, amount, timestamp, signature, tx_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"settlement-{tx_hash}-peer",
+                    peer_id,
+                    "self",
+                    -amount,
+                    time.time(),
+                    tx_hash,
+                    "settlement",
+                ),
+            )
+            await self._db.execute(
+                """
+                INSERT INTO balances(peer_id, balance, total_sent, total_received, last_updated)
+                VALUES (?, ?, 0, 0, ?)
+                ON CONFLICT(peer_id) DO UPDATE SET balance=?, last_updated=excluded.last_updated
+                """,
+                (peer_id, new_balance, time.time(), new_balance),
+            )
+            await self._db.commit()
+            self._balance_cache[peer_id] = new_balance
+            return new_balance
+
+    async def record_settlement(self, peer_id: str, amount: float, tx_hash: str = "") -> float:
+        """Alias for record_payment for clarity."""
+        return await self.record_payment(peer_id, amount, tx_hash)
     
     async def get_balance(self, peer_id: str) -> float:
         """
@@ -1031,6 +1103,81 @@ class Ledger:
             )
             for row in rows
         ]
+
+    # =========================================================================
+    # Knowledge Base
+    # =========================================================================
+
+    async def add_knowledge_entry(
+        self,
+        cid: str,
+        path: str,
+        summary: str,
+        tags: str,
+        size: int,
+        metadata: Dict[str, Any],
+    ) -> int:
+        """Добавить запись в knowledge_base."""
+        if self._memory:
+            entry_id = len(self._knowledge_mem)
+            self._knowledge_mem.append(
+                {
+                    "id": entry_id,
+                    "cid": cid,
+                    "path": path,
+                    "summary": summary,
+                    "tags": tags,
+                    "size": size,
+                    "metadata": metadata,
+                    "created_at": time.time(),
+                }
+            )
+            return entry_id
+
+        async with self._lock:
+            await self._db.execute(
+                """
+                INSERT INTO knowledge_base (cid, path, summary, tags, created_at, size, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (cid, path, summary, tags, time.time(), size, json.dumps(metadata)),
+            )
+            await self._db.commit()
+
+            cursor = await self._db.execute("SELECT last_insert_rowid()")
+            row = await cursor.fetchone()
+            return int(row[0])
+
+    async def get_knowledge_entries(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Получить записи из knowledge_base."""
+        if self._memory:
+            return self._knowledge_mem[:limit]
+
+        cursor = await self._db.execute(
+            """
+            SELECT id, cid, path, summary, tags, created_at, size, metadata
+            FROM knowledge_base
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        entries = []
+        for row in rows:
+            entries.append(
+                {
+                    "id": row[0],
+                    "cid": row[1],
+                    "path": row[2],
+                    "summary": row[3],
+                    "tags": row[4],
+                    "created_at": row[5],
+                    "size": row[6],
+                    "metadata": json.loads(row[7]) if row[7] else {},
+                }
+            )
+        return entries
     
     # =========================================================================
     # IOU Management

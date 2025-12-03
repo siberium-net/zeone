@@ -1299,6 +1299,7 @@ Examples:
     
     # Парсим bootstrap узлы
     bootstrap_nodes = parse_bootstrap(args.bootstrap)
+    logger.info(f"[BOOTSTRAP] Parsed bootstrap args: {bootstrap_nodes}")
     if bootstrap_nodes:
         config.network.bootstrap_nodes = bootstrap_nodes
     
@@ -1373,6 +1374,13 @@ Examples:
     # [MARKET] Инициализируем AgentManager с Ledger и node_id
     agent_manager = AgentManager(ledger=ledger, node_id=crypto.node_id)
     logger.info(f"[AGENTS] Initialized with services: {list(agent_manager._agents.keys())}")
+
+    # Vector store / background ingestion
+    from cortex.archivist.vector_store import VectorStore
+    from cortex.background import IdleWorker
+    vector_store = VectorStore()
+    idle_worker = IdleWorker(ledger=ledger, vector_store=vector_store)
+    await idle_worker.start()
     
     # Создаем узел с интегрированным ledger и agent_manager
     node = Node(
@@ -1417,6 +1425,7 @@ Examples:
     node.on_service_response(on_service_response)
     
     # Запускаем узел
+    logger.info(f"[BOOTSTRAP] Using peers: {config.network.bootstrap_nodes}")
     await node.start()
     
     # [DHT] Инициализируем Kademlia DHT
@@ -1425,6 +1434,9 @@ Examples:
         from core.dht.node import KademliaNode
         kademlia = KademliaNode(node, storage_path=f"dht_{args.port}.db")
         await kademlia.start()
+        if bootstrap_nodes:
+            logger.info(f"[DHT] Bootstrapping Kademlia with {bootstrap_nodes}")
+            await kademlia.bootstrap(bootstrap_nodes)
         logger.info(f"[DHT] Kademlia started: {kademlia.local_id.hex()[:16]}...")
     except ImportError as e:
         logger.warning(f"[DHT] Not available: {e}")
@@ -1476,6 +1488,7 @@ Examples:
                     agent_manager=agent_manager,
                     kademlia=kademlia,
                     cortex=cortex,
+                    idle_worker=idle_worker,
                     title=f"P2P Node - {crypto.node_id[:16]}...",
                 )
                 
@@ -1542,6 +1555,8 @@ Examples:
         
         if kademlia:
             await kademlia.stop()
+        if idle_worker:
+            await idle_worker.stop()
         await node.stop()
         await ledger.close()
         logger.info("[MAIN] Shutdown complete")

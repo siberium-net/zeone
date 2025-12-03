@@ -30,6 +30,23 @@ RestrictedPython
 
 # Distributed AI Inference
 numpy>=1.24.0
+chromadb
+sentence-transformers
+pypdf
+transformers
+torch
+pillow
+opencv-python
+einops
+timm
+imagehash
+insightface
+onnxruntime-gpu
+scikit-learn
+presidio-analyzer
+presidio-anonymizer
+geoip2
+spacy
 
 # PyTorch Model Loading (optional, for real inference)
 # torch>=2.0.0

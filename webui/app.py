@@ -12,11 +12,15 @@ P2P Node Web UI - Главное приложение
 
 import asyncio
 import logging
+import uuid
+from collections import deque
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from logging import Handler
+from cortex.archivist import AsyncFileScanner, DocumentProcessor, VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +34,20 @@ except ImportError:
 
 # Path to static files
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+class GUILogHandler(Handler):
+    """Logging handler that stores formatted records in a deque for UI display."""
+    def __init__(self, buffer: deque):
+        super().__init__()
+        self.buffer = buffer
+    
+    def emit(self, record) -> None:
+        try:
+            msg = self.format(record)
+            self.buffer.append(msg)
+        except Exception:
+            self.handleError(record)
 
 
 @dataclass
@@ -71,6 +89,7 @@ class P2PWebUI:
         kademlia=None,
         cortex=None,
         visualizer=None,
+        idle_worker=None,
         title: str = "P2P Node",
         dark_mode: bool = True,
     ):
@@ -91,18 +110,36 @@ class P2PWebUI:
         self.kademlia = kademlia
         self.cortex = cortex
         self.visualizer = visualizer
+        self.idle_worker = idle_worker
         self.title = title
         self.dark_mode = dark_mode
         
         self._state = NodeState()
         self._update_interval = 2.0  # секунды
         self._running = False
+        self._log_buffer = deque(maxlen=500)
+        self._log_handler: Optional[logging.Handler] = None
+        self._dream_mode_enabled = False
         
         # Callbacks для обновления UI
         self._update_callbacks: list = []
         
         # Cortex UI state
         self._use_council = False
+        
+        # Hook logs into UI
+        self._attach_log_handler()
+    
+    def _attach_log_handler(self) -> None:
+        """Attach log handler to feed UI log panel."""
+        try:
+            handler = GUILogHandler(self._log_buffer)
+            handler.setLevel(logging.INFO)
+            logging.getLogger().addHandler(handler)
+            self._log_handler = handler
+            logger.info("[WEBUI] GUI log handler attached")
+        except Exception as e:
+            logger.warning(f"[WEBUI] Failed to attach GUI log handler: {e}")
     
     def _update_state(self) -> None:
         """Обновить состояние из node."""
@@ -159,6 +196,7 @@ class P2PWebUI:
                 ui.button('Economy', icon='account_balance', on_click=lambda: ui.navigate.to('/economy')).classes('w-full justify-start')
                 ui.button('Storage', icon='folder', on_click=lambda: ui.navigate.to('/storage')).classes('w-full justify-start')
                 ui.button('Compute', icon='memory', on_click=lambda: ui.navigate.to('/compute')).classes('w-full justify-start')
+                ui.button('Ingest', icon='cloud_upload', on_click=lambda: ui.navigate.to('/ingest')).classes('w-full justify-start')
                 
                 ui.separator()
                 
@@ -260,8 +298,23 @@ class P2PWebUI:
     
     async def _refresh_dht(self) -> None:
         """Обновить DHT."""
-        ui.notify('Refreshing DHT...', type='info')
-        # TODO: Implement
+        if not self.kademlia:
+            ui.notify('DHT not available', type='warning')
+            return
+        try:
+            stats = await self.kademlia.get_full_stats()
+            routing = stats.get('routing_table', {})
+            stored = stats.get('storage', {})
+            if hasattr(self, '_dht_node_id'):
+                self._dht_node_id.text = stats.get('local_id', '')[:32]
+            if hasattr(self, '_dht_routing'):
+                self._dht_routing.text = f"Buckets: {routing.get('bucket_count', '-')}, Peers: {routing.get('total_nodes', '-')}"
+            if hasattr(self, '_dht_stored_keys'):
+                self._dht_stored_keys.text = str(stored.get('total_entries', stored.get('active_entries', '-')))
+            ui.notify('DHT refreshed', type='positive')
+        except Exception as e:
+            logger.error(f"[WEBUI] DHT refresh failed: {e}")
+            ui.notify(f'DHT refresh error: {e}', type='negative')
     
     def _create_peers_page(self) -> None:
         """Страница Peers."""
@@ -331,7 +384,23 @@ class P2PWebUI:
             return
         
         ui.notify(f'Connecting to {address}...', type='info')
-        # TODO: Implement
+        try:
+            host, port_str = address.rsplit(':', 1)
+            port = int(port_str)
+        except Exception:
+            ui.notify('Address must be host:port', type='warning')
+            return
+        
+        if not self.node:
+            ui.notify('Node not available', type='warning')
+            return
+        
+        peer = await self.node.connect_to_peer(host, port)
+        if peer:
+            ui.notify(f'Connected to {host}:{port}', type='positive')
+            await self._refresh_peers()
+        else:
+            ui.notify(f'Failed to connect {host}:{port}', type='negative')
     
     def _create_services_page(self) -> None:
         """Страница Services."""
@@ -653,7 +722,7 @@ class P2PWebUI:
         
         if self.kademlia:
             try:
-                await self.kademlia.put(key, value.encode())
+                await self.kademlia.dht_put(key, value.encode())
                 ui.notify(f'Stored: {key}', type='positive')
             except Exception as e:
                 ui.notify(f'Error: {e}', type='negative')
@@ -666,7 +735,7 @@ class P2PWebUI:
         
         if self.kademlia:
             try:
-                value = await self.kademlia.get(key)
+                value = await self.kademlia.dht_get(key)
                 if value:
                     if hasattr(self, '_dht_get_result'):
                         self._dht_get_result.text = f'Value: {value.decode()}'
@@ -684,8 +753,15 @@ class P2PWebUI:
             ui.notify('Key required', type='warning')
             return
         
-        ui.notify(f'Deleted: {key}', type='info')
-        # TODO: Implement
+        if self.kademlia:
+            try:
+                deleted = await self.kademlia.dht_delete(key)
+                if deleted:
+                    ui.notify(f'Deleted: {key}', type='positive')
+                else:
+                    ui.notify('Key not found', type='warning')
+            except Exception as e:
+                ui.notify(f'Error: {e}', type='negative')
     
     def _create_economy_page(self) -> None:
         """Страница Economy."""
@@ -738,16 +814,40 @@ class P2PWebUI:
             return
         
         try:
-            summary = await self.ledger.get_summary()
+            balances_list = await self.ledger.get_all_balances()
+            
+            total_claims = 0.0
+            total_debts = 0.0
+            rows = []
+            
+            for entry in balances_list:
+                peer_id = entry.get("peer_id", "") if isinstance(entry, dict) else entry[0]
+                balance = entry.get("balance", 0.0) if isinstance(entry, dict) else entry[1]
+                sent = entry.get("total_sent", 0.0) if isinstance(entry, dict) else entry[2]
+                received = entry.get("total_received", 0.0) if isinstance(entry, dict) else entry[3]
+                
+                if balance >= 0:
+                    total_claims += balance
+                else:
+                    total_debts += abs(balance)
+                
+                rows.append({
+                    'peer_id': peer_id[:16] + '...',
+                    'balance': f"{balance:+.0f}",
+                    'total_sent': f"{sent:.0f}",
+                    'total_received': f"{received:.0f}",
+                    'status': 'Blocked' if balance > getattr(self.ledger, 'debt_limit', 0) else 'OK',
+                })
+            
+            net = total_claims - total_debts
             
             if hasattr(self, '_total_claims'):
-                self._total_claims.text = f"{summary.get('total_claims', 0):.0f}"
+                self._total_claims.text = f"{total_claims:.0f}"
             
             if hasattr(self, '_total_debts'):
-                self._total_debts.text = f"{summary.get('total_debts', 0):.0f}"
+                self._total_debts.text = f"{total_debts:.0f}"
             
             if hasattr(self, '_net_balance'):
-                net = summary.get('total_claims', 0) - summary.get('total_debts', 0)
                 self._net_balance.text = f"{net:+.0f}"
                 if net >= 0:
                     self._net_balance.classes(replace='text-3xl font-bold text-green-500')
@@ -755,17 +855,6 @@ class P2PWebUI:
                     self._net_balance.classes(replace='text-3xl font-bold text-red-500')
             
             # Balances table
-            balances = await self.ledger.get_all_balances()
-            rows = []
-            for peer_id, data in balances.items():
-                rows.append({
-                    'peer_id': peer_id[:16] + '...',
-                    'balance': f"{data.get('balance', 0):+.0f}",
-                    'total_sent': f"{data.get('total_sent', 0):.0f}",
-                    'total_received': f"{data.get('total_received', 0):.0f}",
-                    'status': 'Blocked' if data.get('blocked') else 'OK',
-                })
-            
             if hasattr(self, '_balances_table'):
                 self._balances_table.rows = rows
                 self._balances_table.update()
@@ -1079,15 +1168,22 @@ class P2PWebUI:
                     'w-full h-96 overflow-auto bg-gray-900 text-green-400 p-4 font-mono text-sm rounded'
                 )
                 
-                # Add some sample logs
-                with self._logs_container:
-                    ui.label('[INFO] Web UI started')
-                    ui.label(f'[INFO] Node ID: {self._state.node_id}')
+                ui.timer(1.0, self._flush_logs)
     
     async def _clear_logs(self) -> None:
         """Очистить логи."""
         if hasattr(self, '_logs_container'):
             self._logs_container.clear()
+        self._log_buffer.clear()
+    
+    async def _flush_logs(self) -> None:
+        """Вывести накопленные логи в UI."""
+        if not hasattr(self, '_logs_container'):
+            return
+        while self._log_buffer:
+            record = self._log_buffer.popleft()
+            with self._logs_container:
+                ui.label(record)
     
     def _create_cortex_page(self) -> None:
         """Страница Cortex - Автономная система знаний."""
@@ -1182,6 +1278,7 @@ class P2PWebUI:
                             with ui.row().classes('gap-2 mb-4'):
                                 self._lib_search_input = ui.input('Search topic').classes('flex-grow')
                                 ui.button('Search', icon='search', on_click=lambda: self._search_library(self._lib_search_input.value))
+                                ui.button('Refresh Library', icon='refresh', on_click=self._refresh_library)
                             
                             self._lib_results = ui.column().classes('w-full')
                     
@@ -1232,6 +1329,7 @@ class P2PWebUI:
                             ui.label('Recent Activity').classes('text-lg font-bold mb-4')
                             
                             ui.button('Refresh', icon='refresh', on_click=self._refresh_activity)
+                            ui.button('Force Scan', icon='bolt', on_click=self._force_scan)
                             
                             self._activity_list = ui.column().classes('w-full mt-4')
                     
@@ -1440,6 +1538,10 @@ class P2PWebUI:
                                     with ui.column():
                                         ui.label(report.topic).classes('font-bold')
                                         ui.label(report.summary[:200] + '...' if len(report.summary) > 200 else report.summary).classes('text-sm')
+                                        status = getattr(report, 'compliance_status', None) or getattr(report, 'status', None)
+                                        if status:
+                                            color = {'SAFE': 'green', 'WARNING': 'orange', 'BLOCKED': 'red'}.get(status, 'gray')
+                                            ui.badge(status, color=color)
                                     
                                     with ui.column().classes('text-right'):
                                         ui.badge(f'{report.quality_score:.2f}', color='green' if report.quality_score > 0.7 else 'yellow')
@@ -1452,6 +1554,49 @@ class P2PWebUI:
                                         
         except Exception as e:
             ui.notify(f"Search error: {e}", type='negative')
+    
+    async def _refresh_library(self) -> None:
+        """Показать последние темы библиотеки."""
+        if not self.cortex:
+            ui.notify('Cortex not available', type='error')
+            return
+        
+        if hasattr(self, '_lib_results'):
+            self._lib_results.clear()
+            with self._lib_results:
+                ui.label('Loading recent topics...').classes('text-gray-500')
+        
+        try:
+            investigations = self.cortex.get_recent_investigations(10)
+            topics = [inv.topic for inv in investigations]
+            
+            if hasattr(self, '_lib_results'):
+                self._lib_results.clear()
+                with self._lib_results:
+                    if not topics:
+                        ui.label('No topics yet. Try Force Scan or Investigate.').classes('text-gray-500')
+                    else:
+                        for topic in topics:
+                            reports = await self.cortex.search(topic)
+                            if not reports:
+                                with ui.card().classes('w-full mb-2'):
+                                    ui.label(topic).classes('font-bold')
+                                    ui.label('No reports yet').classes('text-sm text-gray-500')
+                                continue
+                            
+                            for report in reports[:1]:
+                                with ui.card().classes('w-full mb-2'):
+                                    with ui.row().classes('justify-between items-start'):
+                                        with ui.column():
+                                            ui.label(report.topic).classes('font-bold')
+                                            ui.label(report.summary).classes('text-sm')
+                                        with ui.column().classes('text-right'):
+                                            ui.label(f"CID: {report.cid[:12]}...").classes('text-xs font-mono')
+                                            ts = datetime.fromtimestamp(report.created_at).strftime('%Y-%m-%d %H:%M:%S')
+                                            ui.label(ts).classes('text-xs text-gray-500')
+                                            ui.badge(f'{report.quality_score:.2f}', color='green' if report.quality_score > 0.7 else 'yellow')
+        except Exception as e:
+            ui.notify(f"Library refresh error: {e}", type='negative')
     
     async def _convene_council(self, topic: str, text: str, budget: float) -> None:
         """Созвать совет аналитиков."""
@@ -1586,6 +1731,9 @@ class P2PWebUI:
                                     with ui.column():
                                         ui.label(inv.topic).classes('font-bold')
                                         ui.label(f"ID: {inv.investigation_id}").classes('text-xs font-mono')
+                                        if hasattr(inv, 'updated_at') and inv.updated_at:
+                                            ts = datetime.fromtimestamp(inv.updated_at).strftime('%Y-%m-%d %H:%M:%S')
+                                            ui.label(f"Updated: {ts}").classes('text-xs text-gray-500')
                                     
                                     status_color = {
                                         'completed': 'green',
@@ -1597,18 +1745,124 @@ class P2PWebUI:
                                     }.get(inv.status.value, 'gray')
                                     
                                     ui.badge(inv.status.value, color=status_color)
-                                    
+                    
+                    # Append latest logs snapshot
+                    ui.label('Recent Logs').classes('text-lg font-bold mt-4')
+                    for record in list(self._log_buffer)[-10:]:
+                        ui.label(record).classes('text-xs font-mono text-gray-400')
+            
             except Exception as e:
                 with self._activity_list:
                     ui.label(f"Error: {e}").classes('text-red-500')
-    
+
     async def _refresh_neural_graph(self) -> None:
         """Обновить 3D граф через WebSocket."""
         if self.visualizer:
             await self.visualizer._build_graph()
             ui.notify('Graph refreshed', type='positive')
-        else:
-            ui.notify('Visualizer not available', type='warning')
+
+    async def _force_scan(self) -> None:
+        """Принудительно обработать тестовую тему через автомату."""
+        if not self.cortex or not getattr(self.cortex, 'automata', None):
+            ui.notify('Cortex automata not available', type='warning')
+            return
+        
+        topic = f"Test Topic {uuid.uuid4().hex[:6]}"
+        ui.notify(f'Processing {topic}...', type='info')
+        
+        try:
+            result = await self.cortex.automata.process_topic(topic)
+            ui.notify(f'Completed {topic}: {result.status.value}', type='positive')
+            await self._refresh_library()
+            await self._refresh_activity()
+        except Exception as e:
+            ui.notify(f'Force scan error: {e}', type='negative')
+
+    # =========================================================================
+    # Ingest
+    # =========================================================================
+    def _create_ingest_page(self) -> None:
+        """Страница для загрузки локальных файлов."""
+        
+        @ui.page('/ingest')
+        async def ingest():
+            await self._create_header()
+            await self._create_sidebar()
+            
+            with ui.column().classes('w-full p-4'):
+            ui.label('Ingest Documents').classes('text-2xl font-bold mb-4')
+            ui.label('Point to a directory to scan, summarize, and index for RAG.').classes('text-sm text-gray-500')
+            
+            self._ingest_path = ui.input('Directory path', value=str(Path.cwd())).classes('w-full')
+            self._dream_toggle = ui.checkbox('Enable Background Media Analysis (Dream Mode)', value=self._dream_mode_enabled)
+            self._ingest_progress = ui.label('Idle').classes('text-sm text-gray-500')
+            self._ingest_button = ui.button('Start Digestion', icon='cloud_upload', on_click=self._start_ingest)
+            
+            self._ingest_logs = ui.column().classes('w-full mt-4')
+    
+    async def _start_ingest(self) -> None:
+        """Запустить процесс инжеста документов."""
+        path = getattr(self, "_ingest_path", None)
+        if path:
+            path = path.value
+        if not path:
+            ui.notify('Provide directory path', type='warning')
+            return
+        self._dream_mode_enabled = getattr(self, "_dream_toggle", None).value if hasattr(self, "_dream_toggle") else False
+        
+        ui.notify(f'Scanning {path}...', type='info')
+        if hasattr(self, "_ingest_progress"):
+            self._ingest_progress.text = "Scanning..."
+        
+        if self._dream_mode_enabled and self.idle_worker:
+            self.idle_worker.enqueue([path])
+            ui.notify('Queued for background processing', type='positive')
+            if hasattr(self, "_ingest_progress"):
+                self._ingest_progress.text = "Queued in background..."
+            return
+        
+        scanner = AsyncFileScanner()
+        processor = DocumentProcessor()
+        vector_store = VectorStore()
+        
+        processed = 0
+        added = 0
+        
+        async for doc in scanner.scan_directory(path):
+            processed += 1
+            if hasattr(self, "_ingest_progress"):
+                self._ingest_progress.text = f"Processed {processed}"
+            try:
+                result = await processor.process_document(doc.text, doc.metadata)
+                cid = result.get("summary", "")[:32]
+                summary = result.get("summary", "")[:512]
+                tags = ""
+                if isinstance(result.get("summary"), str):
+                    tags = ""
+                if self.ledger:
+                    await self.ledger.add_knowledge_entry(
+                        cid=cid,
+                        path=str(doc.path),
+                        summary=summary,
+                        tags=tags,
+                        size=int(doc.metadata.get("size", 0)),
+                        metadata=doc.metadata,
+                    )
+                # Vector store
+                vector_store.embed_and_store([doc.text], metadata=doc.metadata)
+                added += 1
+                if hasattr(self, "_ingest_logs"):
+                    with self._ingest_logs:
+                        ui.label(f"[INGEST] {doc.path.name} ingested").classes('text-xs')
+            except Exception as e:
+                logger.warning(f"[INGEST] Failed on {doc.path}: {e}")
+                if hasattr(self, "_ingest_logs"):
+                    with self._ingest_logs:
+                        ui.label(f"[ERR] {doc.path.name}: {e}").classes('text-xs text-red-500')
+        
+        if hasattr(self, "_ingest_progress"):
+            self._ingest_progress.text = f"Completed. Added {added} / {processed}"
+        ui.notify(f'Ingestion complete: {added} files', type='positive')
     
     def _setup_websocket_endpoint(self) -> None:
         """Настроить WebSocket endpoint для визуализации."""
@@ -1666,6 +1920,7 @@ class P2PWebUI:
         self._create_compute_page()
         self._create_settings_page()
         self._create_logs_page()
+        self._create_ingest_page()
         self._setup_websocket_endpoint()
     
     def run_sync(self, host: str = "0.0.0.0", port: int = 8080) -> None:
@@ -1753,6 +2008,7 @@ def create_webui(
     kademlia=None,
     cortex=None,
     visualizer=None,
+    idle_worker=None,
     **kwargs,
 ) -> P2PWebUI:
     """
@@ -1785,6 +2041,6 @@ def create_webui(
         kademlia=kademlia,
         cortex=cortex,
         visualizer=visualizer,
+        idle_worker=idle_worker,
         **kwargs,
     )
-

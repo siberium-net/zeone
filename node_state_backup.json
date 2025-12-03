@@ -1,0 +1,18 @@
+{
+  "node_id": "DCMc3I4utTPtGogiJfCXo98gwNW4VmhVyglfNkR0yQ4=",
+  "host": "127.0.0.1",
+  "port": 9000,
+  "created_at": 1764752740.2940662,
+  "last_saved": 1764752740.2940795,
+  "uptime_total": 0.0,
+  "peers": {},
+  "bootstrap_nodes": [],
+  "dht_node_id": "",
+  "dht_stored_keys": 0,
+  "total_connections": 0,
+  "total_messages_sent": 0,
+  "total_messages_received": 0,
+  "total_bytes_sent": 0,
+  "total_bytes_received": 0,
+  "_backup_time": 1764752740.3021398
+}
