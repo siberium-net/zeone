@@ -58,11 +58,13 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Tuple, Optional
+from collections import deque
 
 # Configure portable environment before heavy imports
 ROOT_DIR = Path(__file__).parent
 from core.env_setup import configure_environment
 configure_environment(ROOT_DIR)
+from core.logger import UIStreamHandler
 
 # Загрузка переменных окружения из .env файла
 try:
@@ -113,6 +115,12 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("p2p")
+
+# UI log handler buffer
+ui_log_buffer = deque(maxlen=1000)
+ui_handler = UIStreamHandler(ui_log_buffer)
+ui_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(ui_handler)
 
 
 def format_bytes(num_bytes: float) -> str:

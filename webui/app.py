@@ -23,6 +23,10 @@ from logging import Handler
 from cortex.archivist import AsyncFileScanner, DocumentProcessor, VectorStore
 from core.events import event_bus
 from webui.components.downloader import DownloadManager
+from webui.tabs.library import LibraryTab
+from webui.tabs.ingest import IngestTab
+from webui.tabs.activity import ActivityTab
+from webui.components.gallery import Gallery
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +128,10 @@ class P2PWebUI:
         self._dream_mode_enabled = False
         self._version_text = "unknown"
         self.downloader = DownloadManager()
+        self.library_tab = LibraryTab(Path("ledger.db"), self)
+        self.gallery = Gallery()
+        self.ingest_tab = IngestTab(self.gallery)
+        self.activity_tab = ActivityTab(ui_log_buffer if 'ui_log_buffer' in globals() else deque(maxlen=1000))
         
         # Callbacks для обновления UI
         self._update_callbacks: list = []
@@ -1954,6 +1962,9 @@ class P2PWebUI:
         self._create_settings_page()
         self._create_logs_page()
         self._create_ingest_page()
+        self.library_tab.create_page()
+        self.ingest_tab.create_page(self)
+        self.activity_tab.create_page(self)
         self._setup_websocket_endpoint()
     
     def run_sync(self, host: str = "0.0.0.0", port: int = 8080) -> None:
