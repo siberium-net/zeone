@@ -47,6 +47,8 @@ presidio-analyzer
 presidio-anonymizer
 geoip2
 spacy
+gitpython
+packaging
 
 # PyTorch Model Loading (optional, for real inference)
 # torch>=2.0.0

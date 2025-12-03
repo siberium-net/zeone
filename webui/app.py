@@ -120,6 +120,7 @@ class P2PWebUI:
         self._log_buffer = deque(maxlen=500)
         self._log_handler: Optional[logging.Handler] = None
         self._dream_mode_enabled = False
+        self._version_text = "unknown"
         
         # Callbacks для обновления UI
         self._update_callbacks: list = []
@@ -1129,6 +1130,8 @@ class P2PWebUI:
                 
                 with ui.card().classes('w-full max-w-2xl'):
                     ui.label('Node Settings').classes('text-lg font-bold')
+                    ui.label(f"Version: {self._version_text}").classes('text-sm text-gray-500')
+                    ui.button('Update & Restart', icon='system_update_alt', on_click=self._trigger_update)
                     
                     ui.input('Node ID', value=self._state.node_id).props('readonly')
                     ui.input('Host', value=self._state.host)
@@ -1184,6 +1187,10 @@ class P2PWebUI:
             record = self._log_buffer.popleft()
             with self._logs_container:
                 ui.label(record)
+
+    async def _trigger_update(self) -> None:
+        """Trigger backend update and restart (placeholder)."""
+        ui.notify("Update requested; node will restart if auto-update is enabled.", type="info")
     
     def _create_cortex_page(self) -> None:
         """Страница Cortex - Автономная система знаний."""

@@ -71,6 +71,7 @@ from core.node import Node
 from core.transport import Crypto, Message, MessageType
 from economy.ledger import Ledger, DEFAULT_DEBT_LIMIT_BYTES
 from agents.manager import AgentManager, ServiceRequest, ServiceResponse
+from core.updater import UpdateManager
 
 # Production imports (optional)
 try:
@@ -1264,6 +1265,11 @@ Examples:
         help="Web UI port (default: 8080)",
     )
     parser.add_argument(
+        "--auto-update",
+        action="store_true",
+        help="Enable auto-update from git with periodic checks",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging",
@@ -1427,6 +1433,19 @@ Examples:
     # Запускаем узел
     logger.info(f"[BOOTSTRAP] Using peers: {config.network.bootstrap_nodes}")
     await node.start()
+
+    # Periodic auto-update loop
+    if args.auto_update:
+        async def _auto_update_loop():
+            while True:
+                await asyncio.sleep(21600)  # 6 hours
+                has_update, log = updater.check_update_available()
+                if has_update:
+                    logger.info(f"[UPDATER] Update available:\n" + "\n".join(log))
+                    if updater.perform_update():
+                        logger.info("[UPDATER] Update applied, restarting...")
+                        updater.restart_node()
+        asyncio.create_task(_auto_update_loop())
     
     # [DHT] Инициализируем Kademlia DHT
     kademlia = None
@@ -1567,3 +1586,11 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    updater = UpdateManager(Path(__file__).parent)
+    if args.auto_update:
+        has_update, log = updater.check_update_available()
+        if has_update:
+            logger.info(f"[UPDATER] Update available:\n" + "\n".join(log))
+            if updater.perform_update():
+                logger.info("[UPDATER] Update applied, restarting...")
+                updater.restart_node()
