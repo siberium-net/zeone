@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from logging import Handler
 from cortex.archivist import AsyncFileScanner, DocumentProcessor, VectorStore
+from core.events import event_bus
+from webui.components.downloader import DownloadManager
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,7 @@ class P2PWebUI:
         self._log_handler: Optional[logging.Handler] = None
         self._dream_mode_enabled = False
         self._version_text = "unknown"
+        self.downloader = DownloadManager()
         
         # Callbacks для обновления UI
         self._update_callbacks: list = []
@@ -141,6 +144,15 @@ class P2PWebUI:
             logger.info("[WEBUI] GUI log handler attached")
         except Exception as e:
             logger.warning(f"[WEBUI] Failed to attach GUI log handler: {e}")
+        
+        # Subscribe to download_progress events
+        async def on_progress(payload):
+            self.downloader.update(payload)
+        try:
+            import asyncio
+            asyncio.create_task(event_bus.subscribe("download_progress", on_progress))
+        except Exception:
+            pass
     
     def _update_state(self) -> None:
         """Обновить состояние из node."""
@@ -1143,6 +1155,8 @@ class P2PWebUI:
                     ui.number('Max Peers', value=50)
                     ui.number('Debt Limit (bytes)', value=100_000_000)
                     
+                    ui.button('Test P2P Download', icon='cloud_download', on_click=self._test_p2p_download)
+                    
                     ui.separator()
                     
                     ui.label('AI').classes('font-bold mt-4')
@@ -1784,6 +1798,16 @@ class P2PWebUI:
             await self._refresh_activity()
         except Exception as e:
             ui.notify(f'Force scan error: {e}', type='negative')
+
+    async def _test_p2p_download(self) -> None:
+        """Trigger small test download via P2P loader."""
+        ui.notify('Starting P2P test download...', type='info')
+        try:
+            loader = P2PLoader(kademlia=getattr(self, 'kademlia', None), node=self, base_dir=Path("data/models"))
+            await loader.ensure_model("prajjwal1/bert-tiny", fallback_http=True)
+            ui.notify('P2P test download finished', type='positive')
+        except Exception as e:
+            ui.notify(f'P2P test download failed: {e}', type='negative')
 
     # =========================================================================
     # Ingest

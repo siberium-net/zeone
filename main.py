@@ -59,6 +59,11 @@ import time
 from pathlib import Path
 from typing import List, Tuple, Optional
 
+# Configure portable environment before heavy imports
+ROOT_DIR = Path(__file__).parent
+from core.env_setup import configure_environment
+configure_environment(ROOT_DIR)
+
 # Загрузка переменных окружения из .env файла
 try:
     from dotenv import load_dotenv
