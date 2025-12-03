@@ -12,9 +12,11 @@ class DownloadManager:
         self._visible = False
         self._source_label = None
         self._peers_label = None
-        self._build()
+        self._mounted = False
 
-    def _build(self):
+    def mount(self):
+        if self._mounted:
+            return
         with ui.footer(value=True).classes('fixed bottom-0 left-0 right-0 p-2 bg-gray-800 text-white'):
             with ui.row().classes('items-center gap-4 w-full'):
                 self._label = ui.label('Model: -')
@@ -22,6 +24,7 @@ class DownloadManager:
                 self._source_label = ui.label('Source: -')
                 self._peers_label = ui.label('Peers: -')
         self.hide()
+        self._mounted = True
 
     def update(self, payload: Dict[str, Any]) -> None:
         self.show()
@@ -34,6 +37,8 @@ class DownloadManager:
         self._peers_label.text = f"Peers: {payload.get('peers', 0)}"
 
     def show(self):
+        if not self._mounted:
+            return
         self._visible = True
         self._progress.visible = True
         self._label.visible = True
@@ -41,6 +46,8 @@ class DownloadManager:
         self._peers_label.visible = True
 
     def hide(self):
+        if not self._mounted:
+            return
         self._visible = False
         self._progress.visible = False
         self._label.visible = False

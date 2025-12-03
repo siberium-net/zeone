@@ -1,9 +1,9 @@
 {
-  "node_id": "DCMc3I4utTPtGogiJfCXo98gwNW4VmhVyglfNkR0yQ4=",
+  "node_id": "oTXo5i/wmb/HnQ7WZX+ro+PNxhLJFmu+zRmXZNnvAEw=",
   "host": "127.0.0.1",
-  "port": 9000,
-  "created_at": 1764752740.2940662,
-  "last_saved": 1764752740.2940795,
+  "port": 9001,
+  "created_at": 1764775653.7799466,
+  "last_saved": 1764775653.779958,
   "uptime_total": 0.0,
   "peers": {},
   "bootstrap_nodes": [],
@@ -14,5 +14,5 @@
   "total_messages_received": 0,
   "total_bytes_sent": 0,
   "total_bytes_received": 0,
-  "_backup_time": 1764752740.3021398
+  "_backup_time": 1764775653.7883663
 }

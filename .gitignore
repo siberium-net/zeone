@@ -31,3 +31,8 @@ contracts/
 
 # Logs
 *.log
+
+# Local data/models/cache (profiles, downloads)
+data/
+*.cache/
+vector_store/

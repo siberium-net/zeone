@@ -183,6 +183,8 @@ class P2PWebUI:
     
     async def _create_header(self) -> None:
         """Создать шапку страницы."""
+        # Mount downloader UI lazily inside a page context to avoid global-scope UI
+        self.downloader.mount()
         with ui.header().classes('items-center justify-between'):
             ui.label(self.title).classes('text-xl font-bold')
             
@@ -1821,15 +1823,15 @@ class P2PWebUI:
             await self._create_sidebar()
             
             with ui.column().classes('w-full p-4'):
-            ui.label('Ingest Documents').classes('text-2xl font-bold mb-4')
-            ui.label('Point to a directory to scan, summarize, and index for RAG.').classes('text-sm text-gray-500')
-            
-            self._ingest_path = ui.input('Directory path', value=str(Path.cwd())).classes('w-full')
-            self._dream_toggle = ui.checkbox('Enable Background Media Analysis (Dream Mode)', value=self._dream_mode_enabled)
-            self._ingest_progress = ui.label('Idle').classes('text-sm text-gray-500')
-            self._ingest_button = ui.button('Start Digestion', icon='cloud_upload', on_click=self._start_ingest)
-            
-            self._ingest_logs = ui.column().classes('w-full mt-4')
+                ui.label('Ingest Documents').classes('text-2xl font-bold mb-4')
+                ui.label('Point to a directory to scan, summarize, and index for RAG.').classes('text-sm text-gray-500')
+                
+                self._ingest_path = ui.input('Directory path', value=str(Path.cwd())).classes('w-full')
+                self._dream_toggle = ui.checkbox('Enable Background Media Analysis (Dream Mode)', value=self._dream_mode_enabled)
+                self._ingest_progress = ui.label('Idle').classes('text-sm text-gray-500')
+                self._ingest_button = ui.button('Start Digestion', icon='cloud_upload', on_click=self._start_ingest)
+                
+                self._ingest_logs = ui.column().classes('w-full mt-4')
     
     async def _start_ingest(self) -> None:
         """Запустить процесс инжеста документов."""
