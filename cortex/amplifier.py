@@ -3,6 +3,8 @@ Traffic Amplifier - DHT-backed chunk cache and lookup.
 """
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import time
@@ -23,14 +25,17 @@ class Amplifier:
         node=None,
         kademlia=None,
         cache: Optional[AmplifierCache] = None,
+        ledger=None,
         max_advertised: int = 32,
     ):
         self.node = node
         self.kademlia = kademlia
         self.cache = cache or AmplifierCache()
+        self.ledger = ledger
         self.max_advertised = max_advertised
         self._advertised: set[str] = set()
         self._lock = asyncio.Lock()
+        self._pending: Dict[str, asyncio.Future] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -109,7 +114,78 @@ class Amplifier:
     # ------------------------------------------------------------------
     async def _fetch_from_provider(self, chunk_hash: str, provider: Dict[str, Any]) -> Optional[bytes]:
         """
-        Placeholder for peer-to-peer fetch.
-        TODO: implement hole punching / direct transfer protocol.
+        Запросить chunk у конкретного пира через CACHE_REQUEST/CACHE_RESPONSE.
         """
-        return None
+        if not self.node:
+            return None
+
+        peer_id = provider.get("node_id") if isinstance(provider, dict) else provider
+        if not peer_id:
+            return None
+
+        # Ensure connection
+        peer = self.node.peer_manager.get_peer(peer_id)
+        if not peer:
+            host = provider.get("host")
+            port = provider.get("port")
+            if host and port:
+                try:
+                    peer = await self.node.connect_to_peer(host, port)
+                except Exception:
+                    peer = None
+            if not peer:
+                return None
+
+        # Prepare future
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        self._pending[chunk_hash] = fut
+
+        request = Message(
+            type=MessageType.CACHE_REQUEST,
+            payload={"hash": chunk_hash},
+            sender_id=self.node.node_id,
+        )
+        sent = await self.node.send_to(peer_id, request, with_accounting=False)
+        if not sent:
+            self._pending.pop(chunk_hash, None)
+            return None
+
+        try:
+            response: Dict[str, Any] = await asyncio.wait_for(fut, timeout=5.0)
+        except asyncio.TimeoutError:
+            self._pending.pop(chunk_hash, None)
+            return None
+
+        self._pending.pop(chunk_hash, None)
+
+        if not response.get("found"):
+            return None
+        data_b64 = response.get("data")
+        if not data_b64:
+            return None
+        try:
+            data = base64.b64decode(data_b64)
+        except Exception:
+            return None
+
+        # Verify hash
+        if hashlib.sha256(data).hexdigest() != chunk_hash:
+            # Penalize trust if ledger is available
+            try:
+                if self.ledger:
+                    await self.ledger.update_trust_score(peer_id, "invalid_message")
+            except Exception:
+                pass
+            return None
+
+        return data
+
+    async def handle_cache_response(self, payload: Dict[str, Any]) -> None:
+        """Handle incoming CACHE_RESPONSE from protocol handler."""
+        chunk_hash = payload.get("hash")
+        if not chunk_hash:
+            return
+        fut = self._pending.get(chunk_hash)
+        if fut and not fut.done():
+            fut.set_result(payload)

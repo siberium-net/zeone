@@ -1407,6 +1407,12 @@ Examples:
     # [MARKET] Инициализируем AgentManager с Ledger и node_id
     agent_manager = AgentManager(ledger=ledger, node_id=crypto.node_id)
     logger.info(f"[AGENTS] Initialized with services: {list(agent_manager._agents.keys())}")
+    try:
+        from agents.cache_provider import CacheProviderAgent
+        cache_agent = CacheProviderAgent(amplifier=None)
+    except Exception as e:
+        cache_agent = None
+        logger.warning(f"[AGENTS] CacheProviderAgent unavailable: {e}")
 
     # Vector store / background ingestion
     from cortex.archivist.vector_store import VectorStore
@@ -1423,6 +1429,7 @@ Examples:
         use_masking=args.masking,
         ledger=ledger,
         agent_manager=agent_manager,
+        amplifier=None,  # set after amplifier init
     )
     
     socks_server: Optional[SocksServer] = None
@@ -1499,7 +1506,11 @@ Examples:
         pathfinder = VpnPathfinder(node=node, kademlia=kademlia, ledger=ledger)
     else:
         pathfinder = None
-    amplifier = Amplifier(node=node, kademlia=kademlia)
+    amplifier = Amplifier(node=node, kademlia=kademlia, ledger=ledger)
+    node.amplifier = amplifier
+    if cache_agent:
+        cache_agent.attach_amplifier(amplifier)
+        agent_manager.register_agent(cache_agent)
 
     # VPN Exit mode setup
     vpn_exit_enabled = args.exit_node or getattr(config, "vpn_mode", "off") == "exit"

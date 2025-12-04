@@ -58,6 +58,8 @@ class MessageType(Enum):
     VPN_DATA = auto()           # Потоковые данные VPN
     VPN_CLOSE = auto()          # Закрытие туннеля
     STREAM = auto()             # Общие потоковые данные с seq
+    CACHE_REQUEST = auto()      # Запрос кэшированного чанка
+    CACHE_RESPONSE = auto()     # Ответ с чанком
 
 
 @dataclass

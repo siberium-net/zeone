@@ -575,6 +575,8 @@ class ProtocolRouter:
         # [MARKET] Layer 3 - обработчики услуг
         self.register(ServiceRequestHandler())
         self.register(ServiceResponseHandler())
+        self.register(CacheRequestHandler())
+        self.register(CacheResponseHandler())
     
     def register(self, handler: MessageHandler) -> None:
         """Зарегистрировать обработчик."""
@@ -598,3 +600,74 @@ class ProtocolRouter:
         
         return await handler.handle(message, crypto, context)
 
+
+class CacheRequestHandler(MessageHandler):
+    """Обработчик запросов на кэшированные чанки."""
+
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.CACHE_REQUEST
+
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        if not crypto.verify_signature(message):
+            return None
+
+        payload = message.payload or {}
+        chunk_hash = payload.get("hash")
+        if not chunk_hash:
+            return None
+
+        data_bytes: Optional[bytes] = None
+
+        amplifier = context.get("amplifier")
+        if amplifier:
+            data_bytes = await amplifier.get_chunk(chunk_hash)
+
+        if data_bytes is None:
+            agent_manager = context.get("agent_manager")
+            if agent_manager:
+                agent = agent_manager.get_agent("cache_provider")
+                if agent and hasattr(agent, "get_chunk"):
+                    try:
+                        data_bytes = await agent.get_chunk(chunk_hash)
+                    except Exception:
+                        data_bytes = None
+
+        response_payload: Dict[str, Any] = {"found": data_bytes is not None, "hash": chunk_hash}
+        if data_bytes is not None:
+            response_payload["data"] = base64.b64encode(data_bytes).decode("ascii")
+
+        response = Message(
+            type=MessageType.CACHE_RESPONSE,
+            payload=response_payload,
+            sender_id=crypto.node_id,
+        )
+        return crypto.sign_message(response)
+
+
+class CacheResponseHandler(MessageHandler):
+    """Обработчик ответов на кэш-запросы."""
+
+    @property
+    def message_type(self) -> MessageType:
+        return MessageType.CACHE_RESPONSE
+
+    async def handle(
+        self,
+        message: Message,
+        crypto: Crypto,
+        context: Dict[str, Any]
+    ) -> Optional[Message]:
+        if not crypto.verify_signature(message):
+            return None
+
+        amplifier = context.get("amplifier")
+        if amplifier:
+            payload = message.payload or {}
+            await amplifier.handle_cache_response(payload)
+        return None

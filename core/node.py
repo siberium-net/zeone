@@ -37,6 +37,7 @@ from .protocol import (
 if TYPE_CHECKING:
     from economy.ledger import Ledger
     from agents.manager import AgentManager, ServiceResponse
+    from cortex.amplifier import Amplifier
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -287,6 +288,7 @@ class Node:
         use_masking: bool = False,
         ledger: Optional["Ledger"] = None,
         agent_manager: Optional["AgentManager"] = None,
+        amplifier: Optional[Any] = None,
     ):
         """
         Инициализация узла.
@@ -309,6 +311,7 @@ class Node:
         
         # [MARKET] AgentManager для обработки запросов услуг
         self.agent_manager = agent_manager
+        self.amplifier = amplifier
         if self.agent_manager and hasattr(self.agent_manager, "set_node"):
             try:
                 self.agent_manager.set_node(self)
@@ -710,6 +713,7 @@ class Node:
                     "ledger": self.ledger,
                     "agent_manager": self.agent_manager,
                     "on_service_response": self._handle_service_response,
+                    "amplifier": self.amplifier,
                 }
                 
                 response = await self.router.route(message, self.crypto, context)

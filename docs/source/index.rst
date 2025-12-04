@@ -5,8 +5,7 @@ ZEONE Documentation
    :maxdepth: 2
    :caption: Contents
 
-   01_architecture
-   02_cortex_vision
-   03_compliance
-   04_economy
-   05_tokenomics
+   01_whitepaper
+   02_core
+   03_modules
+   04_api
