@@ -7,6 +7,8 @@ P2P Network Configuration
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
+import os
+
 
 @dataclass
 class NetworkConfig:
@@ -157,3 +159,6 @@ class Config:
 
 # Глобальный экземпляр конфигурации
 config = Config()
+
+# Compliance toggle (disabled by default)
+COMPLIANCE_ENABLED = os.getenv("COMPLIANCE_ENABLED", "False").lower() == "true"

@@ -1,6 +1,8 @@
 import logging
 from typing import List, Dict, Any
 
+from config import COMPLIANCE_ENABLED
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -15,17 +17,23 @@ class PIIGuard:
     """PII scanner powered by Presidio."""
 
     def __init__(self):
+        if not COMPLIANCE_ENABLED:
+            self.engine = None
+            self.active = False
+            logger.warning("[COMPLIANCE] Compliance module disabled. PII scanning skipped.")
+            return
         if not _PRESIDIO_AVAILABLE:
             logger.warning("[COMPLIANCE] Presidio not available")
             self.engine = None
+            self.active = False
             return
         self.engine = AnalyzerEngine()
-        # Ensure credit card recognizer is present
         self.engine.registry.add_recognizer(CreditCardRecognizer())
+        self.active = True
 
     def scan_text(self, text: str) -> Dict[str, Any]:
-        if not self.engine:
-            return {"findings": [], "risk": 0.0, "status": "UNKNOWN"}
+        if not self.active or not self.engine:
+            return {"findings": [], "risk": 0.0, "status": "DISABLED"}
 
         findings = self.engine.analyze(
             text=text,

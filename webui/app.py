@@ -1151,21 +1151,26 @@ class P2PWebUI:
                 ui.label('Settings').classes('text-2xl font-bold mb-4')
                 
                 with ui.card().classes('w-full max-w-2xl'):
-                    ui.label('Node Settings').classes('text-lg font-bold')
-                    ui.label(f"Version: {self._version_text}").classes('text-sm text-gray-500')
-                    ui.button('Update & Restart', icon='system_update_alt', on_click=self._trigger_update)
-                    
-                    ui.input('Node ID', value=self._state.node_id).props('readonly')
-                    ui.input('Host', value=self._state.host)
-                    ui.number('Port', value=self._state.port)
-                    
-                    ui.separator()
-                    
-                    ui.label('Network').classes('font-bold mt-4')
-                    ui.number('Max Peers', value=50)
-                    ui.number('Debt Limit (bytes)', value=100_000_000)
-                    
-                    ui.button('Test P2P Download', icon='cloud_download', on_click=self._test_p2p_download)
+                ui.label('Node Settings').classes('text-lg font-bold')
+                ui.label(f"Version: {self._version_text}").classes('text-sm text-gray-500')
+                ui.button('Update & Restart', icon='system_update_alt', on_click=self._trigger_update)
+                
+                ui.input('Node ID', value=self._state.node_id).props('readonly')
+                ui.input('Host', value=self._state.host)
+                ui.number('Port', value=self._state.port)
+                
+                ui.separator()
+                
+                ui.label('Network').classes('font-bold mt-4')
+                ui.number('Max Peers', value=50)
+                ui.number('Debt Limit (bytes)', value=100_000_000)
+                
+                ui.button('Test P2P Download', icon='cloud_download', on_click=self._test_p2p_download)
+                
+                ui.separator()
+                ui.label('Compliance').classes('font-bold mt-4')
+                comp_toggle = ui.checkbox('Enable Legal/PII Checks (Requires Restart)', value=False)
+                comp_toggle.on_change(self._toggle_compliance)
                     
                     ui.separator()
                     
@@ -1818,6 +1823,23 @@ class P2PWebUI:
             ui.notify('P2P test download finished', type='positive')
         except Exception as e:
             ui.notify(f'P2P test download failed: {e}', type='negative')
+    
+    def _toggle_compliance(self, e):
+        """Persist compliance toggle to .env."""
+        try:
+            val = e.value
+            env_path = Path(".env")
+            lines = []
+            if env_path.exists():
+                lines = env_path.read_text().splitlines()
+            kv = f"COMPLIANCE_ENABLED={'True' if val else 'False'}"
+            # replace or append
+            filtered = [ln for ln in lines if not ln.startswith("COMPLIANCE_ENABLED=")]
+            filtered.append(kv)
+            env_path.write_text("\n".join(filtered) + "\n")
+            ui.notify("Compliance setting saved. Restart required.", type="info")
+        except Exception as ex:
+            ui.notify(f"Failed to save setting: {ex}", type="negative")
 
     # =========================================================================
     # Ingest
