@@ -123,8 +123,7 @@ from .consilium import (
 from .pathfinder import VpnPathfinder
 
 # Amplifier (traffic deduplication)
-from .amplifier import Amplifier
-from .amplifier.cache import AmplifierCache
+from .amplifier import Amplifier, AmplifierCache
 
 # Automata
 from .automata import (

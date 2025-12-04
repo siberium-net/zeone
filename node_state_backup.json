@@ -1,11 +1,29 @@
 {
-  "node_id": "oTXo5i/wmb/HnQ7WZX+ro+PNxhLJFmu+zRmXZNnvAEw=",
-  "host": "127.0.0.1",
-  "port": 9001,
-  "created_at": 1764775653.7799466,
-  "last_saved": 1764775653.779958,
+  "node_id": "8vXtoiVlOg0KauYeTisHyF/mKPiB4exfMmdiEQkXM/s=",
+  "host": "0.0.0.0",
+  "port": 8468,
+  "created_at": 1764865119.322921,
+  "last_saved": 1764865119.3229616,
   "uptime_total": 0.0,
-  "peers": {},
+  "peers": {
+    "8vXtoiVlOg0KauYeTisHyF/mKPiB4exfMmdiEQkXM/s=": {
+      "node_id": "8vXtoiVlOg0KauYeTisHyF/mKPiB4exfMmdiEQkXM/s=",
+      "host": "127.0.0.1",
+      "port": 8468,
+      "first_seen": 0.0,
+      "last_seen": 0.0,
+      "last_connected": 1764865119.322942,
+      "connection_count": 0,
+      "failed_connections": 0,
+      "trust_score": 0.5,
+      "is_bootstrap": false,
+      "supports_dht": false,
+      "supports_relay": false,
+      "nat_type": "unknown",
+      "public_ip": "",
+      "public_port": 0
+    }
+  },
   "bootstrap_nodes": [],
   "dht_node_id": "",
   "dht_stored_keys": 0,
@@ -14,5 +32,5 @@
   "total_messages_received": 0,
   "total_bytes_sent": 0,
   "total_bytes_received": 0,
-  "_backup_time": 1764775653.7883663
+  "_backup_time": 1764865119.3296423
 }

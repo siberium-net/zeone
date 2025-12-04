@@ -1319,11 +1319,6 @@ Examples:
         action="store_true",
         help="Disable rate limiting and DoS protection",
     )
-    parser.add_argument(
-        "--exit-node",
-        action="store_true",
-        help="Run as VPN exit node (advertise vpn_exit service)",
-    )
     
     args = parser.parse_args()
     
@@ -1735,11 +1730,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-    updater = UpdateManager(Path(__file__).parent)
-    if args.auto_update:
-        has_update, log = updater.check_update_available()
-        if has_update:
-            logger.info(f"[UPDATER] Update available:\n" + "\n".join(log))
-            if updater.perform_update():
-                logger.info("[UPDATER] Update applied, restarting...")
-                updater.restart_node()

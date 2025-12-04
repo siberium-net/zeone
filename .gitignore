@@ -36,3 +36,4 @@ contracts/
 data/
 *.cache/
 vector_store/
+docs/build/

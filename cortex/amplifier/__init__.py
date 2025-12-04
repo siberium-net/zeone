@@ -10,7 +10,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from cortex.amplifier.cache import AmplifierCache
+from .cache import AmplifierCache
+from core.transport import Message, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class Amplifier:
         return await self.cache.get(chunk_hash)
 
     async def fetch_or_get(self, chunk_hash: str) -> Optional[bytes]:
-        """Try local cache, then peers via DHT (placeholder fetch)."""
+        """Try local cache, then peers via DHT."""
         local = await self.cache.get(chunk_hash)
         if local:
             return local
@@ -110,7 +111,7 @@ class Amplifier:
         return []
 
     # ------------------------------------------------------------------
-    # Networking placeholder
+    # Networking
     # ------------------------------------------------------------------
     async def _fetch_from_provider(self, chunk_hash: str, provider: Dict[str, Any]) -> Optional[bytes]:
         """
@@ -171,7 +172,6 @@ class Amplifier:
 
         # Verify hash
         if hashlib.sha256(data).hexdigest() != chunk_hash:
-            # Penalize trust if ledger is available
             try:
                 if self.ledger:
                     await self.ledger.update_trust_score(peer_id, "invalid_message")
@@ -189,3 +189,6 @@ class Amplifier:
         fut = self._pending.get(chunk_hash)
         if fut and not fut.done():
             fut.set_result(payload)
+
+
+__all__ = ["Amplifier", "AmplifierCache"]

@@ -2,10 +2,8 @@ ZEONE Documentation
 ===================
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Contents
+   :maxdepth: 1
+   :caption: Choose language
 
-   01_whitepaper
-   02_core
-   03_modules
-   04_api
+   en/index
+   ru/index

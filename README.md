@@ -1,51 +1,39 @@
+[🇷🇺 Читать на русском](README_RU.md)
+
 ![ZEONE](https://img.shields.io/badge/version-v1.0.0-blue) ![Python](https://img.shields.io/badge/python-3.11-blueviolet) ![License](https://img.shields.io/badge/license-MIT-black) ![Network](https://img.shields.io/badge/network-Sovereign-green)
 
-# ZEONE — децентрализованная операционная система для когнитивного интернета
+# ZEONE — decentralized operating system for the cognitive internet
 
-ZEONE объединяет вычисления, трафик и экономику в единый одноранговый стек: от криптографического транспорта до локальных LLM и P2P‑кэша видео.
+ZEONE unifies compute, traffic, and economics into a peer-to-peer stack—from NaCl transport to local LLMs and P2P caching for video.
 
-## 🧭 Что внутри
+## Features
+- 🧠 **Cortex:** Local LLM + RAG + Vision (Florence-2) pipeline.
+- 🛡️ **VPN Tunnel:** Decentralized SOCKS5 with `VpnExitAgent` and smart Pathfinder (speed/price/reliable).
+- 🚀 **Amplifier:** P2P CDN with `CACHE_REQUEST` / `CACHE_RESPONSE` chunk sharing and caching for video/files.
+- 💎 **Tokenomics:** Ledger IOU + ERC-20 settlement, Trust Score, billing hooks for bandwidth and services.
 
-| Модуль | Возможности |
-| --- | --- |
-| 🧠 **Cortex** | Локальный LLM, RAG, Vision (Florence‑2) и мультимодальный пайплайн. |
-| 🚀 **Amplifier** | P2P CDN: корреляция трафика, `CACHE_REQUEST` протокол, обмен чанками и кэширование видео/файлов. |
-| 🛡️ **VPN Tunnel** | Децентрализованный SOCKS5, `VpnExitAgent`, умный Pathfinder (скорость/цена), Amplifier‑дедупликация. |
-| 💎 **Economy** | Ledger с IOU + on‑chain settlement (ERC‑20), Trust Score, биллинг трафика и услуг. |
-
-## ⚡ Быстрый старт
-
+## Quick Start (Docker)
 ```bash
 docker-compose up
 ```
 
-После старта WebUI доступен на `http://localhost:8080` (по умолчанию).
+WebUI defaults to `http://localhost:8080`.
 
-## ✨ Ключевые фичи
-- **Суверенный транспорт:** NaCl E2E, Kademlia DHT, BlockingTransport с учетом долга.
-- **Маршрутизация VPN:** Pathfinder сканирует DHT, пингует пиров, выбирает лучший выход (скорость/цена/надежность).
-- **Протокол кэша:** `CACHE_REQUEST` / `CACHE_RESPONSE` обмен чанками между пирами; Amplifier хранит и раздает сегменты.
-- **Умный выход в интернет:** `VpnExitAgent` открывает реальные соединения, считает байты, списывает токены через Ledger.
-- **Когнитивный контур:** Cortex orchestrates ingest → vision → векторный стор → RAG ответы.
-
-## 🚀 Развертывание вручную
-
+## Manual Run (Python 3.11)
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python main.py --port 8468 --webui --webui-port 8080
 ```
 
-Подключить второй узел:
+Connect a second node:
 ```bash
 python main.py --port 8469 --bootstrap 127.0.0.1:8468 --webui --webui-port 8081
 ```
 
-## 📚 Документация
+## Documentation
+- Build docs: `python build_docs.py`
+- HTML entry: `docs/build/html/index.html`
 
-Sphinx‑сборка: `python build_docs.py`  
-Готовая HTML: `docs/build/html/index.html`
-
-## 📝 Лицензия
-
+## License
 MIT

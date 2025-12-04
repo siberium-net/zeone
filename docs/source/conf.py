@@ -32,3 +32,16 @@ autodoc_default_options = {
     "undoc-members": False,
     "show-inheritance": True,
 }
+
+# LaTeX settings (Cyrillic-friendly)
+latex_engine = "xelatex"
+latex_elements = {
+    "preamble": r"""
+% Cyrillic support
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage{english}
+\setotherlanguage{russian}
+\newfontfamily\russianfont{DejaVu Serif}
+""",
+}

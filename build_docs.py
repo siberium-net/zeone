@@ -35,7 +35,12 @@ def build_pdf() -> int:
         print("[WARN] pdflatex not found, skipping PDF build")
         return 0
     BUILD_PDF.mkdir(parents=True, exist_ok=True)
-    return run(["sphinx-build", "-b", "latexpdf", str(SOURCE), str(BUILD_PDF)])
+    # Some environments lack the latexpdf builder; fall back to latex.
+    rc = run(["sphinx-build", "-b", "latexpdf", str(SOURCE), str(BUILD_PDF)])
+    if rc != 0:
+        print("[WARN] latexpdf builder unavailable; generating LaTeX sources only.")
+        rc = run(["sphinx-build", "-b", "latex", str(SOURCE), str(BUILD_PDF)])
+    return rc
 
 
 def main() -> None:
