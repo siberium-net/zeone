@@ -132,12 +132,32 @@ class P2PWebUI:
         self.gallery = Gallery()
         self.ingest_tab = IngestTab(self.gallery)
         self.activity_tab = ActivityTab(ui_log_buffer if 'ui_log_buffer' in globals() else deque(maxlen=1000))
+        self.vpn_pathfinder = None
+        self._vpn_status_label = None
+        self._vpn_enabled = False
+        self._vpn_region = "Any"
+        self._vpn_strategy = "Speed"
+        self._vpn_selected_node = ""
+        self._vpn_latency_ms: Optional[int] = None
         
         # Callbacks для обновления UI
         self._update_callbacks: list = []
         
         # Cortex UI state
         self._use_council = False
+
+        # Optional: initialize VPN pathfinder if DHT available
+        if self.node and self.kademlia:
+            try:
+                from cortex.pathfinder import VpnPathfinder
+                self.vpn_pathfinder = VpnPathfinder(
+                    node=self.node,
+                    kademlia=self.kademlia,
+                    ledger=self.ledger,
+                )
+                asyncio.create_task(self.vpn_pathfinder.initialize())
+            except Exception as e:
+                logger.warning(f"[WEBUI] VPN pathfinder unavailable: {e}")
         
         # Hook logs into UI
         self._attach_log_handler()
@@ -276,6 +296,23 @@ class P2PWebUI:
                     ui.button('Ping All Peers', icon='wifi', on_click=self._ping_all_peers)
                     ui.button('Refresh DHT', icon='refresh', on_click=self._refresh_dht)
                     ui.button('View Logs', icon='article', on_click=lambda: ui.navigate.to('/logs'))
+
+                ui.label('VPN Control').classes('text-xl font-bold mt-6 mb-2')
+                with ui.card().classes('w-full max-w-3xl'):
+                    with ui.row().classes('items-center gap-4'):
+                        self._vpn_toggle = ui.switch('Enable SOCKS5 Proxy', value=self._vpn_enabled, on_change=self._on_vpn_toggle)
+                        self._vpn_region_select = ui.select(
+                            ['Any', 'US', 'EU', 'Asia'],
+                            value=self._vpn_region,
+                            label='Target Region',
+                        ).props('outlined dense')
+                        self._vpn_strategy_radio = ui.radio(
+                            ['Speed', 'Price', 'Reliable'],
+                            value=self._vpn_strategy,
+                            on_change=self._on_vpn_strategy_change,
+                        ).props('inline')
+                        ui.button('Connect', icon='bolt', on_click=self._connect_vpn)
+                    self._vpn_status_label = ui.label('Disconnected').classes('text-sm text-gray-500 mt-2')
                 
                 # Auto-refresh
                 ui.timer(self._update_interval, self._refresh_dashboard)
@@ -318,6 +355,62 @@ class P2PWebUI:
         """Отправить ping всем пирам."""
         ui.notify('Pinging all peers...', type='info')
         # TODO: Implement
+
+    async def _on_vpn_toggle(self, *args, **kwargs) -> None:
+        """Handle VPN toggle."""
+        self._vpn_enabled = bool(getattr(self._vpn_toggle, "value", False))
+        if not self._vpn_enabled:
+            self._vpn_selected_node = ""
+            self._vpn_latency_ms = None
+            self._set_vpn_status("Disconnected", color="gray")
+            return
+        await self._connect_vpn()
+
+    def _on_vpn_strategy_change(self, *args, **kwargs) -> None:
+        self._vpn_strategy = self._vpn_strategy_radio.value or "Speed"
+
+    async def _connect_vpn(self, *args, **kwargs) -> None:
+        """Pick best exit via pathfinder and update UI."""
+        if not self._vpn_enabled:
+            self._set_vpn_status("VPN disabled", color="gray")
+            return
+        if not self.vpn_pathfinder:
+            self._set_vpn_status("Pathfinder unavailable", color="orange")
+            return
+
+        region = (self._vpn_region_select.value or "Any").strip()
+        self._vpn_region = region
+        strategy_label = self._vpn_strategy_radio.value or "Speed"
+        self._vpn_strategy = strategy_label
+
+        strategy_map = {"Speed": "fastest", "Price": "cheapest", "Reliable": "reliable"}
+        strategy = strategy_map.get(strategy_label, "fastest")
+        target_country = region.lower()
+
+        self._set_vpn_status("Probing exits...", color="blue")
+        try:
+            result = await self.vpn_pathfinder.pick_exit(target_country=target_country, strategy=strategy)
+        except Exception as e:
+            logger.warning(f"[WEBUI] VPN connect failed: {e}")
+            self._set_vpn_status("Connect failed", color="red")
+            return
+
+        if not result:
+            self._set_vpn_status("No exit found", color="red")
+            return
+
+        self._vpn_selected_node = result.get("node_id", "")[:12]
+        latency_ms = int(result.get("latency", 0) * 1000)
+        self._vpn_latency_ms = latency_ms
+        self._set_vpn_status(
+            f"Connected via {self._vpn_selected_node} ({latency_ms} ms)",
+            color="green",
+        )
+
+    def _set_vpn_status(self, text: str, color: str = "gray") -> None:
+        if self._vpn_status_label:
+            self._vpn_status_label.text = text
+            self._vpn_status_label.classes(f"text-sm text-{color}-500 mt-2")
     
     async def _refresh_dht(self) -> None:
         """Обновить DHT."""
@@ -1151,26 +1244,26 @@ class P2PWebUI:
                 ui.label('Settings').classes('text-2xl font-bold mb-4')
                 
                 with ui.card().classes('w-full max-w-2xl'):
-                ui.label('Node Settings').classes('text-lg font-bold')
-                ui.label(f"Version: {self._version_text}").classes('text-sm text-gray-500')
-                ui.button('Update & Restart', icon='system_update_alt', on_click=self._trigger_update)
-                
-                ui.input('Node ID', value=self._state.node_id).props('readonly')
-                ui.input('Host', value=self._state.host)
-                ui.number('Port', value=self._state.port)
-                
-                ui.separator()
-                
-                ui.label('Network').classes('font-bold mt-4')
-                ui.number('Max Peers', value=50)
-                ui.number('Debt Limit (bytes)', value=100_000_000)
-                
-                ui.button('Test P2P Download', icon='cloud_download', on_click=self._test_p2p_download)
-                
-                ui.separator()
-                ui.label('Compliance').classes('font-bold mt-4')
-                comp_toggle = ui.checkbox('Enable Legal/PII Checks (Requires Restart)', value=False)
-                comp_toggle.on_change(self._toggle_compliance)
+                    ui.label('Node Settings').classes('text-lg font-bold')
+                    ui.label(f"Version: {self._version_text}").classes('text-sm text-gray-500')
+                    ui.button('Update & Restart', icon='system_update_alt', on_click=self._trigger_update)
+                    
+                    ui.input('Node ID', value=self._state.node_id).props('readonly')
+                    ui.input('Host', value=self._state.host)
+                    ui.number('Port', value=self._state.port)
+                    
+                    ui.separator()
+                    
+                    ui.label('Network').classes('font-bold mt-4')
+                    ui.number('Max Peers', value=50)
+                    ui.number('Debt Limit (bytes)', value=100_000_000)
+                    
+                    ui.button('Test P2P Download', icon='cloud_download', on_click=self._test_p2p_download)
+                    
+                    ui.separator()
+                    ui.label('Compliance').classes('font-bold mt-4')
+                    comp_toggle = ui.checkbox('Enable Legal/PII Checks (Requires Restart)', value=False)
+                    comp_toggle.on_change(self._toggle_compliance)
                     
                     ui.separator()
                     

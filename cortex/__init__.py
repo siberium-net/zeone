@@ -119,6 +119,9 @@ from .consilium import (
     convene_council,
 )
 
+# Pathfinder / smart routing
+from .pathfinder import VpnPathfinder
+
 # Automata
 from .automata import (
     Automata,
@@ -201,4 +204,3 @@ __all__ = [
 ]
 
 __version__ = "0.1.0"
-
