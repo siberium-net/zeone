@@ -309,6 +309,11 @@ class Node:
         
         # [MARKET] AgentManager для обработки запросов услуг
         self.agent_manager = agent_manager
+        if self.agent_manager and hasattr(self.agent_manager, "set_node"):
+            try:
+                self.agent_manager.set_node(self)
+            except Exception as e:
+                logger.warning(f"[NODE] Failed to attach node to agent manager: {e}")
         
         # Менеджер пиров
         self.peer_manager = PeerManager(max_peers=config.network.max_peers)
@@ -666,15 +671,24 @@ class Node:
                 # [ECONOMY] Учитываем полученные данные
                 received_bytes = len(header) + len(payload)
                 peer.bytes_received += received_bytes
-                
-                if self.ledger:
-                    # Записываем debt - мы получили данные, должны peer
-                    await self.ledger.record_debt(peer.node_id, received_bytes)
-                
+
                 message = SimpleTransport.unpack(payload)
                 
                 # Обновляем last_seen
                 peer.last_seen = time.time()
+
+                # [STREAMING] VPN/streaming трафик тарифицируется отдельно
+                skip_accounting = message.type in {
+                    MessageType.VPN_DATA,
+                    MessageType.VPN_CONNECT,
+                    MessageType.VPN_CONNECT_RESULT,
+                    MessageType.VPN_CLOSE,
+                    MessageType.STREAM,
+                }
+
+                if self.ledger and not skip_accounting:
+                    # Записываем debt - мы получили данные, должны peer
+                    await self.ledger.record_debt(peer.node_id, received_bytes)
                 
                 # DHT request/response handling
                 if await self._handle_dht_payload(peer, message):

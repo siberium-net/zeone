@@ -40,6 +40,7 @@ from config import config
 
 if TYPE_CHECKING:
     from economy.ledger import Ledger
+    from core.node import Node
 
 logger = logging.getLogger(__name__)
 
@@ -793,6 +794,7 @@ class AgentManager:
         """
         self.ledger = ledger
         self.node_id = node_id
+        self._node: Optional["Node"] = None
         
         # Реестр агентов: service_name -> Agent
         self._agents: Dict[str, BaseAgent] = {}
@@ -809,6 +811,15 @@ class AgentManager:
         self.register_agent(EchoAgent())
         self.register_agent(StorageAgent())
         self.register_agent(ComputeAgent())
+
+        # VPN Exit Agent
+        try:
+            from .vpn import VpnExitAgent
+            self.register_agent(VpnExitAgent(ledger=self.ledger))
+        except ImportError as e:
+            logger.warning(f"[AGENTS] VpnExitAgent not available: {e}")
+        except Exception as e:
+            logger.warning(f"[AGENTS] Failed to init VpnExitAgent: {e}")
         
         # Web Reader Agent - скачивание и парсинг веб-страниц
         try:
@@ -839,6 +850,11 @@ class AgentManager:
         для запросов от других узлов.
         """
         self._agents[agent.service_name] = agent
+        if self._node and hasattr(agent, "attach_node"):
+            try:
+                agent.attach_node(self._node)
+            except Exception as e:
+                logger.warning(f"[AGENT] Failed to attach node to {agent.service_name}: {e}")
         logger.info(f"[AGENT] Registered: {agent.service_name} ({agent.description})")
     
     def unregister_agent(self, service_name: str) -> bool:
@@ -876,6 +892,18 @@ class AgentManager:
     def set_node_id(self, node_id: str) -> None:
         """Установить ID узла."""
         self.node_id = node_id
+
+    def set_node(self, node: "Node") -> None:
+        """
+        Установить Node и передать его агентам, которым нужен доступ.
+        """
+        self._node = node
+        for agent in self._agents.values():
+            if hasattr(agent, "attach_node"):
+                try:
+                    agent.attach_node(node)
+                except Exception as e:
+                    logger.warning(f"[AGENT] Failed to attach node to {agent.service_name}: {e}")
     
     async def handle_request(
         self,
@@ -947,8 +975,15 @@ class AgentManager:
                 )
         
         # 4. Выполняем услугу
+        agent_payload = request.payload
+        if isinstance(agent_payload, dict):
+            if "requester_id" not in agent_payload:
+                agent_payload = {**agent_payload, "requester_id": request.requester_id}
+            if "request_id" not in agent_payload:
+                agent_payload = {**agent_payload, "request_id": request.request_id}
+
         try:
-            result, units = await agent.execute(request.payload)
+            result, units = await agent.execute(agent_payload)
             actual_cost = agent.calculate_cost(units)
             
             # Проверяем, что фактическая стоимость не превышает бюджет

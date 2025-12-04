@@ -17,7 +17,7 @@ import time
 import hashlib
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 from nacl.public import PrivateKey, PublicKey, Box
 from nacl.signing import SigningKey, VerifyKey
@@ -51,6 +51,13 @@ class MessageType(Enum):
     SERVICE_REQUEST = auto()    # Запрос услуги
     SERVICE_RESPONSE = auto()   # Ответ на запрос услуги
     SERVICE_LIST = auto()       # Список доступных услуг
+
+    # VPN / Streaming
+    VPN_CONNECT = auto()        # Запрос на установление туннеля
+    VPN_CONNECT_RESULT = auto() # Результат подключения
+    VPN_DATA = auto()           # Потоковые данные VPN
+    VPN_CLOSE = auto()          # Закрытие туннеля
+    STREAM = auto()             # Общие потоковые данные с seq
 
 
 @dataclass
@@ -122,6 +129,150 @@ class Message:
         }
         # Детерминированная сериализация для консистентных подписей
         return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+@dataclass
+class StreamingMessage:
+    """
+    Потоковое сообщение с порядковым номером.
+
+    [STREAMING] Используется для передачи больших данных по кускам
+    с сохранением порядка доставки.
+    """
+
+    stream_id: str
+    seq: int
+    data: bytes
+    eof: bool = False
+    metadata: Optional[Dict[str, Any]] = None
+
+    def to_payload(self) -> Dict[str, Any]:
+        """Преобразовать в payload для Message."""
+        payload: Dict[str, Any] = {
+            "stream_id": self.stream_id,
+            "seq": self.seq,
+            "data": base64.b64encode(self.data).decode("ascii"),
+            "eof": self.eof,
+        }
+        if self.metadata:
+            payload["meta"] = self.metadata
+        return payload
+
+    def to_message(
+        self,
+        sender_id: str,
+        message_type: MessageType = MessageType.STREAM,
+    ) -> Message:
+        """Обертка в общий Message для передачи по сети."""
+        return Message(
+            type=message_type,
+            payload=self.to_payload(),
+            sender_id=sender_id,
+        )
+
+    @classmethod
+    def from_payload(cls, payload: Dict[str, Any]) -> "StreamingMessage":
+        """Создать StreamingMessage из payload."""
+        data_b64 = payload.get("data", "")
+        raw = base64.b64decode(data_b64) if data_b64 else b""
+        return cls(
+            stream_id=payload["stream_id"],
+            seq=int(payload.get("seq", 0)),
+            data=raw,
+            eof=bool(payload.get("eof", False)),
+            metadata=payload.get("meta"),
+        )
+
+    @classmethod
+    def from_message(cls, message: Message) -> "StreamingMessage":
+        """Создать StreamingMessage из Message."""
+        return cls.from_payload(message.payload)
+
+    @staticmethod
+    def chunk_bytes(
+        data: bytes,
+        stream_id: str,
+        start_seq: int = 0,
+        chunk_size: int = 16_384,
+        eof: bool = True,
+    ) -> List["StreamingMessage"]:
+        """
+        Разбить байты на последовательность StreamingMessage.
+
+        Args:
+            data: исходные байты
+            stream_id: ID потока
+            start_seq: с какого порядкового номера начинать
+            chunk_size: размер одного блока
+            eof: помечать последний блок как eof
+        """
+        messages: List[StreamingMessage] = []
+        seq = start_seq
+        for offset in range(0, len(data), chunk_size):
+            chunk = data[offset:offset + chunk_size]
+            is_last = offset + chunk_size >= len(data)
+            messages.append(
+                StreamingMessage(
+                    stream_id=stream_id,
+                    seq=seq,
+                    data=chunk,
+                    eof=eof and is_last,
+                )
+            )
+            seq += 1
+        if not messages and eof:
+            messages.append(
+                StreamingMessage(
+                    stream_id=stream_id,
+                    seq=start_seq,
+                    data=b"",
+                    eof=True,
+                )
+            )
+        return messages
+
+
+class StreamingBuffer:
+    """
+    Буфер сборки потоковых сообщений по порядку seq.
+
+    [STREAMING] Позволяет принимать сообщения вне порядка и
+    возвращать готовые байты в правильной последовательности.
+    """
+
+    def __init__(self):
+        self._buffers: Dict[str, Dict[str, Any]] = {}
+
+    def add(self, message: StreamingMessage) -> Tuple[List[bytes], bool]:
+        """
+        Добавить сообщение в буфер.
+
+        Returns:
+            (готовые_чанки, stream_closed)
+        """
+        state = self._buffers.setdefault(
+            message.stream_id,
+            {"expected": 0, "pending": {}},
+        )
+
+        if message.seq < state["expected"]:
+            return ([], message.eof)
+
+        state["pending"][message.seq] = message
+
+        ready: List[bytes] = []
+        finished = False
+
+        while state["expected"] in state["pending"]:
+            next_msg: StreamingMessage = state["pending"].pop(state["expected"])
+            ready.append(next_msg.data)
+            finished = finished or next_msg.eof
+            state["expected"] += 1
+            if next_msg.eof:
+                self._buffers.pop(message.stream_id, None)
+                break
+
+        return ready, finished
 
 
 class Crypto:
@@ -543,4 +694,3 @@ class BlockingTransport:
         
         # Распаковываем
         return SimpleTransport.unpack(data)
-
