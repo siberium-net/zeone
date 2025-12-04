@@ -9,12 +9,13 @@ import socket
 import struct
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, Optional, TYPE_CHECKING, Any
 
 from core.transport import Message, MessageType, StreamingMessage, StreamingBuffer
 
 if TYPE_CHECKING:
     from core.node import Node, Peer
+    from cortex.amplifier import Amplifier
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class SocksSession:
     inbound_buffer: StreamingBuffer = field(default_factory=StreamingBuffer)
     closed: bool = False
     close_event: asyncio.Event = field(default_factory=asyncio.Event)
+    blind_buffer: bytearray = field(default_factory=bytearray)
 
 
 class SocksServer:
@@ -55,6 +57,8 @@ class SocksServer:
         listen_port: int = 1080,
         chunk_size: int = 16_384,
         connect_timeout: float = 10.0,
+        amplifier: Optional["Amplifier"] = None,
+        blind_chunk_size: int = 1_048_576,
     ):
         self.node = node
         self.exit_peer_id = exit_peer_id
@@ -62,6 +66,8 @@ class SocksServer:
         self.listen_port = listen_port
         self.chunk_size = chunk_size
         self.connect_timeout = connect_timeout
+        self.amplifier = amplifier
+        self.blind_chunk_size = blind_chunk_size
         self._server: Optional[asyncio.AbstractServer] = None
         self._sessions: Dict[str, SocksSession] = {}
         self._pending_connect: Dict[str, asyncio.Future] = {}
@@ -242,7 +248,8 @@ class SocksServer:
         if ready_chunks:
             try:
                 for chunk in ready_chunks:
-                    session.writer.write(chunk)
+                    processed = await self._process_amplifier_meta(session, chunk, payload)
+                    session.writer.write(processed)
                 await session.writer.drain()
             except Exception as e:
                 logger.warning(f"[SOCKS] Write to client failed: {e}")
@@ -329,3 +336,64 @@ class SocksServer:
         for session_id, session in list(self._sessions.items()):
             if session.writer is writer:
                 await self._cleanup_session(session_id, reason="client_closed")
+
+    # ------------------------------------------------------------------
+    # Amplifier helpers
+    # ------------------------------------------------------------------
+    async def _process_amplifier_meta(
+        self,
+        session: SocksSession,
+        chunk: bytes,
+        payload: Dict[str, Any],
+    ) -> bytes:
+        """Handle redirect and caching metadata if amplifier is attached."""
+        if not self.amplifier:
+            return chunk
+
+        meta = payload.get("meta", {}) if payload else {}
+        chunk_hash = meta.get("chunk_hash") or payload.get("chunk_hash")
+        redirect_hash = meta.get("redirect_hash") or payload.get("redirect_hash")
+
+        if not redirect_hash:
+            redirect_hash = self._extract_redirect_hash(chunk)
+
+        if redirect_hash:
+            cached = await self.amplifier.fetch_or_get(redirect_hash)
+            if cached:
+                # Cache the freshly fetched data as well
+                asyncio.create_task(self.amplifier.record_chunk(redirect_hash, cached))
+                return cached
+
+        if chunk_hash:
+            asyncio.create_task(self.amplifier.record_chunk(chunk_hash, chunk))
+        else:
+            await self._maybe_record_blind(session, chunk)
+
+        return chunk
+
+    async def _maybe_record_blind(self, session: SocksSession, chunk: bytes) -> None:
+        """Blind chunking fallback: hash 1MB blocks without app knowledge."""
+        if not self.amplifier or self.blind_chunk_size <= 0:
+            return
+        session.blind_buffer.extend(chunk)
+        while len(session.blind_buffer) >= self.blind_chunk_size:
+            block = bytes(session.blind_buffer[: self.blind_chunk_size])
+            del session.blind_buffer[: self.blind_chunk_size]
+            from cortex.amplifier.cache import AmplifierCache  # lazy import to avoid cycles
+            block_hash = AmplifierCache.compute_hash(block)
+            asyncio.create_task(self.amplifier.record_chunk(block_hash, block))
+
+    @staticmethod
+    def _extract_redirect_hash(data: bytes) -> Optional[str]:
+        """Parse ZEONE_REDIRECT: P2P/<hash> marker from raw bytes."""
+        marker = b"ZEONE_REDIRECT: P2P/"
+        idx = data.find(marker)
+        if idx == -1:
+            return None
+        try:
+            rest = data[idx + len(marker):]
+            end = rest.find(b"\r\n")
+            token = rest[:end if end != -1 else None].decode(errors="ignore").strip()
+            return token or None
+        except Exception:
+            return None

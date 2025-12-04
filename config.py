@@ -155,6 +155,11 @@ class Config:
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    # VPN / Socks defaults
+    vpn_mode: str = "off"            # off | client | exit
+    vpn_exit_price: float = 0.1      # price per MB
+    vpn_exit_country: str = "UN"     # country code of exit node
+    socks_port: int = 1080
 
 
 # Глобальный экземпляр конфигурации

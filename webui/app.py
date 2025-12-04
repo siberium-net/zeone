@@ -96,6 +96,8 @@ class P2PWebUI:
         cortex=None,
         visualizer=None,
         idle_worker=None,
+        start_vpn_client=None,
+        stop_vpn_client=None,
         title: str = "P2P Node",
         dark_mode: bool = True,
     ):
@@ -119,6 +121,8 @@ class P2PWebUI:
         self.idle_worker = idle_worker
         self.title = title
         self.dark_mode = dark_mode
+        self._start_vpn_client = start_vpn_client
+        self._stop_vpn_client = stop_vpn_client
         
         self._state = NodeState()
         self._update_interval = 2.0  # секунды
@@ -139,6 +143,7 @@ class P2PWebUI:
         self._vpn_strategy = "Speed"
         self._vpn_selected_node = ""
         self._vpn_latency_ms: Optional[int] = None
+        self._video_accel_enabled = False
         
         # Callbacks для обновления UI
         self._update_callbacks: list = []
@@ -314,6 +319,16 @@ class P2PWebUI:
                         ui.button('Connect', icon='bolt', on_click=self._connect_vpn)
                     self._vpn_status_label = ui.label('Disconnected').classes('text-sm text-gray-500 mt-2')
                 
+                ui.label('Video Accelerator (Experimental)').classes('text-xl font-bold mt-4 mb-2')
+                with ui.card().classes('w-full max-w-3xl'):
+                    with ui.row().classes('items-center gap-4'):
+                        self._video_accel_toggle = ui.switch(
+                            'Enable Accelerator',
+                            value=self._video_accel_enabled,
+                            on_change=self._on_video_accel_toggle,
+                        )
+                        ui.label('Requires HTTPS correlation via exit node; install CA for full acceleration.').classes('text-sm text-orange-500')
+                
                 # Auto-refresh
                 ui.timer(self._update_interval, self._refresh_dashboard)
     
@@ -363,6 +378,11 @@ class P2PWebUI:
             self._vpn_selected_node = ""
             self._vpn_latency_ms = None
             self._set_vpn_status("Disconnected", color="gray")
+            if self._stop_vpn_client:
+                try:
+                    await self._stop_vpn_client()
+                except Exception as e:
+                    logger.warning(f"[WEBUI] Failed to stop VPN client: {e}")
             return
         await self._connect_vpn()
 
@@ -373,9 +393,6 @@ class P2PWebUI:
         """Pick best exit via pathfinder and update UI."""
         if not self._vpn_enabled:
             self._set_vpn_status("VPN disabled", color="gray")
-            return
-        if not self.vpn_pathfinder:
-            self._set_vpn_status("Pathfinder unavailable", color="orange")
             return
 
         region = (self._vpn_region_select.value or "Any").strip()
@@ -388,6 +405,35 @@ class P2PWebUI:
         target_country = region.lower()
 
         self._set_vpn_status("Probing exits...", color="blue")
+        if self._start_vpn_client:
+            try:
+                result = await self._start_vpn_client(
+                    strategy=strategy,
+                    region=target_country,
+                    enable_accel=self._video_accel_enabled,
+                )
+            except Exception as e:
+                logger.warning(f"[WEBUI] VPN connect failed: {e}")
+                self._set_vpn_status("Connect failed", color="red")
+                return
+            if not result or not result.get("ok"):
+                self._set_vpn_status(result.get("message", "Connection failed"), color="red")
+                return
+            exit_id = result.get("exit_id", "")
+            self._vpn_selected_node = exit_id[:12]
+            latency = result.get("latency")
+            latency_ms = int(latency * 1000) if latency else None
+            self._vpn_latency_ms = latency_ms
+            status = f"Connected via {self._vpn_selected_node}"
+            if latency_ms is not None:
+                status += f" ({latency_ms} ms)"
+            self._set_vpn_status(status, color="green")
+            return
+
+        # Fallback to local pathfinder if start function not provided
+        if not self.vpn_pathfinder:
+            self._set_vpn_status("Pathfinder unavailable", color="orange")
+            return
         try:
             result = await self.vpn_pathfinder.pick_exit(target_country=target_country, strategy=strategy)
         except Exception as e:
@@ -411,6 +457,13 @@ class P2PWebUI:
         if self._vpn_status_label:
             self._vpn_status_label.text = text
             self._vpn_status_label.classes(f"text-sm text-{color}-500 mt-2")
+
+    async def _on_video_accel_toggle(self, *args, **kwargs) -> None:
+        self._video_accel_enabled = bool(getattr(self, "_video_accel_toggle", None) and self._video_accel_toggle.value)
+        if self._video_accel_enabled:
+            ui.notify('Video Accelerator enabled (experimental)', type='info')
+        else:
+            ui.notify('Video Accelerator disabled', type='info')
     
     async def _refresh_dht(self) -> None:
         """Обновить DHT."""
@@ -2168,6 +2221,8 @@ def create_webui(
     cortex=None,
     visualizer=None,
     idle_worker=None,
+    start_vpn_client=None,
+    stop_vpn_client=None,
     **kwargs,
 ) -> P2PWebUI:
     """
@@ -2201,5 +2256,7 @@ def create_webui(
         cortex=cortex,
         visualizer=visualizer,
         idle_worker=idle_worker,
+        start_vpn_client=start_vpn_client,
+        stop_vpn_client=stop_vpn_client,
         **kwargs,
     )

@@ -122,6 +122,10 @@ from .consilium import (
 # Pathfinder / smart routing
 from .pathfinder import VpnPathfinder
 
+# Amplifier (traffic deduplication)
+from .amplifier import Amplifier
+from .amplifier.cache import AmplifierCache
+
 # Automata
 from .automata import (
     Automata,

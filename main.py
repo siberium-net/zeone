@@ -57,7 +57,8 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Callable, Dict, Any
+from contextlib import suppress
 from collections import deque
 
 # Configure portable environment before heavy imports
@@ -65,6 +66,7 @@ ROOT_DIR = Path(__file__).parent
 from core.env_setup import configure_environment
 configure_environment(ROOT_DIR)
 from core.logger import UIStreamHandler
+from core.socks_proxy import SocksServer
 
 # Загрузка переменных окружения из .env файла
 try:
@@ -79,6 +81,8 @@ from core.transport import Crypto, Message, MessageType
 from economy.ledger import Ledger, DEFAULT_DEBT_LIMIT_BYTES
 from agents.manager import AgentManager, ServiceRequest, ServiceResponse
 from core.updater import UpdateManager
+from cortex.pathfinder import VpnPathfinder
+from cortex.amplifier import Amplifier
 
 # Production imports (optional)
 try:
@@ -1295,6 +1299,11 @@ Examples:
         help="Enable metrics collection and export",
     )
     parser.add_argument(
+        "--exit-node",
+        action="store_true",
+        help="Run as VPN exit node (advertise in DHT and serve vpn_exit)",
+    )
+    parser.add_argument(
         "--health-port",
         type=int,
         default=0,
@@ -1309,6 +1318,11 @@ Examples:
         "--no-security",
         action="store_true",
         help="Disable rate limiting and DoS protection",
+    )
+    parser.add_argument(
+        "--exit-node",
+        action="store_true",
+        help="Run as VPN exit node (advertise vpn_exit service)",
     )
     
     args = parser.parse_args()
@@ -1411,6 +1425,11 @@ Examples:
         agent_manager=agent_manager,
     )
     
+    socks_server: Optional[SocksServer] = None
+    pathfinder: Optional[VpnPathfinder] = None
+    amplifier: Optional[Amplifier] = None
+    vpn_tasks: List[asyncio.Task] = []
+    
     # Callbacks
     async def on_peer_connected(peer):
         await ledger.get_or_create_peer(peer.node_id)
@@ -1475,6 +1494,104 @@ Examples:
     except Exception as e:
         logger.error(f"[DHT] Failed to start: {e}")
     
+    # VPN helpers (Pathfinder / Amplifier)
+    if kademlia:
+        pathfinder = VpnPathfinder(node=node, kademlia=kademlia, ledger=ledger)
+    else:
+        pathfinder = None
+    amplifier = Amplifier(node=node, kademlia=kademlia)
+
+    # VPN Exit mode setup
+    vpn_exit_enabled = args.exit_node or getattr(config, "vpn_mode", "off") == "exit"
+    if vpn_exit_enabled:
+        exit_agent = agent_manager.get_agent("vpn_exit")
+        if exit_agent:
+            try:
+                exit_agent._price_per_mb = getattr(config, "vpn_exit_price", 0.1)
+                exit_agent.metadata["price_per_mb"] = getattr(config, "vpn_exit_price", 0.1)
+                exit_agent.metadata["country"] = getattr(config, "vpn_exit_country", "UN")
+            except Exception:
+                pass
+
+    async def _publish_exit_loop() -> None:
+        if not (vpn_exit_enabled and pathfinder):
+            return
+        # Initial publish
+        try:
+            await pathfinder.publish_exit(
+                ip=args.host,
+                geo=getattr(config, "vpn_exit_country", "UN"),
+                price=getattr(config, "vpn_exit_price", 0.1),
+            )
+        except Exception as e:
+            logger.warning(f"[VPN] Initial exit publish failed: {e}")
+        while True:
+            await asyncio.sleep(600)
+            try:
+                await pathfinder.publish_exit(
+                    ip=args.host,
+                    geo=getattr(config, "vpn_exit_country", "UN"),
+                    price=getattr(config, "vpn_exit_price", 0.1),
+                )
+            except Exception as e:
+                logger.debug(f"[VPN] Exit publish tick failed: {e}")
+
+    if vpn_exit_enabled and pathfinder:
+        vpn_tasks.append(asyncio.create_task(_publish_exit_loop()))
+
+    # VPN client controls
+    vpn_client_state: Dict[str, Any] = {"exit_id": None, "latency": None}
+
+    async def stop_vpn_client() -> Dict[str, Any]:
+        nonlocal socks_server
+        if socks_server:
+            await socks_server.stop()
+            socks_server = None
+        vpn_client_state["exit_id"] = None
+        vpn_client_state["latency"] = None
+        return {"ok": True, "message": "VPN client stopped"}
+
+    async def start_vpn_client(
+        strategy: str = "fastest",
+        region: str = "any",
+        enable_accel: bool = True,
+    ) -> Dict[str, Any]:
+        nonlocal socks_server
+        await stop_vpn_client()
+
+        if not pathfinder:
+            return {"ok": False, "message": "Pathfinder unavailable"}
+
+        selected = await pathfinder.pick_exit(
+            target_country=(region or "any").lower(),
+            strategy=strategy or "fastest",
+        )
+        if not selected or not selected.get("node_id"):
+            return {"ok": False, "message": "No exit node found"}
+
+        amp = amplifier if enable_accel else None
+        listen_port = getattr(config, "socks_port", 1080)
+        try:
+            socks = SocksServer(
+                node=node,
+                exit_peer_id=selected["node_id"],
+                listen_port=listen_port,
+                amplifier=amp,
+            )
+            await socks.start()
+            socks_server = socks
+            vpn_client_state["exit_id"] = selected["node_id"]
+            vpn_client_state["latency"] = selected.get("latency")
+            return {
+                "ok": True,
+                "message": "Connected",
+                "exit_id": selected["node_id"],
+                "latency": selected.get("latency"),
+            }
+        except Exception as e:
+            logger.warning(f"[VPN] Failed to start SOCKS client: {e}")
+            return {"ok": False, "message": str(e)}
+    
     # [CORTEX] Инициализируем Cortex - Автономную Систему Знаний
     cortex = None
     if CORTEX_AVAILABLE:
@@ -1521,6 +1638,8 @@ Examples:
                     kademlia=kademlia,
                     cortex=cortex,
                     idle_worker=idle_worker,
+                    start_vpn_client=start_vpn_client,
+                    stop_vpn_client=stop_vpn_client,
                     title=f"P2P Node - {crypto.node_id[:16]}...",
                 )
                 
@@ -1584,6 +1703,12 @@ Examples:
             await rate_limiter.stop()
         if dos_protector:
             await dos_protector.stop()
+        if socks_server:
+            await socks_server.stop()
+        for t in vpn_tasks:
+            t.cancel()
+            with suppress(asyncio.CancelledError):
+                await t
         
         if kademlia:
             await kademlia.stop()
