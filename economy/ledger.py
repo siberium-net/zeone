@@ -669,6 +669,36 @@ class Ledger:
         self._balance_cache[peer_id] = balance
         return balance
     
+    async def get_total_balance(self, peer_id: str) -> float:
+        """
+        Получить общий баланс пира для расчёта Trust Score.
+        
+        [ECONOMY] Сумма:
+        - Локальные IOU (быстрые/бесплатные)
+        - On-chain ZEO токены (через ChainManager, если доступен)
+        
+        [SECURITY] Используется в формуле Weighted Trust Score:
+            T_effective = T_behavior * log10(1 + Stake / BaseStake)
+        
+        Args:
+            peer_id: ID пира
+        
+        Returns:
+            Общий баланс в ZEO (кредиты конвертируются по курсу)
+        """
+        # Получаем IOU баланс (положительный = нам должны)
+        iou_balance = await self.get_balance(peer_id)
+        
+        # Конвертируем байты в ZEO (1 ZEO = 1GB = 1024^3 байт)
+        BYTES_PER_ZEO = 1024 * 1024 * 1024  # 1 GB
+        iou_zeo = max(0.0, iou_balance) / BYTES_PER_ZEO
+        
+        # TODO: Добавить on-chain баланс через ChainManager
+        # on_chain_zeo = await self.chain_manager.get_balance_zeo(peer_id)
+        on_chain_zeo = 0.0
+        
+        return iou_zeo + on_chain_zeo
+    
     async def get_balance_info(self, peer_id: str) -> Dict[str, Any]:
         """
         Получить подробную информацию о балансе с пиром.

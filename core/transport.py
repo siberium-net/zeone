@@ -573,12 +573,13 @@ class TrafficMasker:
 
 
 # Простой формат без маскировки для локальных сетей
+# [DEPRECATED] Используй BinaryTransport для production
 class SimpleTransport:
     """
     Простой транспорт без HTTP маскировки.
     
-    Используется для локальных/доверенных сетей где
-    маскировка не нужна.
+    [DEPRECATED] Используется только для legacy/тестов.
+    Для production используй BinaryTransport.
     
     Формат: 4 байта длины (big-endian) + JSON payload
     """
@@ -607,6 +608,218 @@ class SimpleTransport:
     def get_payload_size(data: bytes) -> int:
         """Получить размер payload в байтах."""
         return len(data)
+
+
+# ============================================================================
+# Binary Wire Protocol V1 - PRODUCTION TRANSPORT
+# ============================================================================
+
+# Import wire protocol components
+from core.wire import (
+    MAGIC,
+    HEADER_SIZE,
+    PROTOCOL_VERSION,
+    WireMessageType,
+    WireHeader,
+    WireMessage,
+    WireCodec,
+    WireStreamReader,
+    WireStreamWriter,
+    WireError,
+    InvalidMagicError,
+    InvalidSignatureError,
+    PayloadTooLargeError,
+    FLAG_ENCRYPTED,
+    FLAG_COMPRESSED,
+)
+
+
+class BinaryTransport:
+    """
+    Binary Wire Protocol V1 Transport.
+    
+    [HARD FORK] Полный отказ от JSON в заголовках.
+    
+    Спецификация: см. core/wire.py
+    
+    [SECURITY]
+    - Magic b'ZE' обязателен - иначе закрываем сокет
+    - Ed25519 подпись покрывает header + payload
+    - NaCl Box для E2E шифрования
+    
+    [USAGE]
+        transport = BinaryTransport(crypto)
+        
+        # Pack
+        wire_bytes = transport.pack(msg_type, payload, recipient_key)
+        
+        # Unpack
+        message = transport.unpack(wire_bytes, sender_keys)
+    """
+    
+    def __init__(self, crypto: Crypto):
+        """
+        Args:
+            crypto: Криптомодуль узла
+        """
+        self.crypto = crypto
+        self.codec = WireCodec(
+            signing_key=crypto.signing_key,
+            private_key=crypto.private_key,
+        )
+        self.stream_reader = WireStreamReader(self.codec)
+        self.stream_writer = WireStreamWriter(self.codec)
+    
+    def pack(
+        self,
+        msg_type: WireMessageType,
+        payload: bytes,
+        recipient_public_key: Optional[PublicKey] = None,
+        flags: int = 0,
+    ) -> bytes:
+        """
+        Упаковать сообщение в бинарный формат.
+        
+        [WIRE] Формат:
+            [Header 98 bytes][Encrypted Payload N bytes]
+        
+        Args:
+            msg_type: Тип сообщения
+            payload: Сырой payload (msgpack/json bytes)
+            recipient_public_key: Ключ получателя для шифрования
+            flags: Дополнительные флаги
+        
+        Returns:
+            Wire bytes
+        """
+        return self.codec.encode(msg_type, payload, recipient_public_key, flags)
+    
+    def unpack(
+        self,
+        data: bytes,
+        sender_verify_key: VerifyKey,
+        sender_public_key: Optional[PublicKey] = None,
+    ) -> WireMessage:
+        """
+        Распаковать сообщение из бинарного формата.
+        
+        [SECURITY]
+        - Проверяет Magic (InvalidMagicError -> close socket)
+        - Верифицирует подпись
+        - Дешифрует payload
+        
+        Args:
+            data: Wire bytes
+            sender_verify_key: Ключ для проверки подписи
+            sender_public_key: Ключ для дешифрования
+        
+        Returns:
+            WireMessage
+        
+        Raises:
+            InvalidMagicError: Закрыть соединение!
+            InvalidSignatureError: Невалидная подпись
+        """
+        return self.codec.decode(data, sender_verify_key, sender_public_key)
+    
+    def unpack_header(self, data: bytes) -> WireHeader:
+        """
+        Распаковать только заголовок.
+        
+        Используется для чтения длины payload перед
+        полным чтением сообщения.
+        
+        [SECURITY] Проверяет Magic!
+        
+        Args:
+            data: Минимум 98 байт
+        
+        Returns:
+            WireHeader
+        
+        Raises:
+            InvalidMagicError: Закрыть соединение!
+        """
+        return self.codec.decode_header_only(data)
+    
+    async def read_message(
+        self,
+        reader,  # asyncio.StreamReader
+        sender_verify_key: VerifyKey,
+        sender_public_key: Optional[PublicKey] = None,
+    ) -> WireMessage:
+        """
+        Прочитать сообщение из потока.
+        
+        [SECURITY] При InvalidMagicError вызывающий код
+        ОБЯЗАН закрыть соединение.
+        """
+        return await self.stream_reader.read_message(
+            reader, sender_verify_key, sender_public_key
+        )
+    
+    async def write_message(
+        self,
+        writer,  # asyncio.StreamWriter
+        msg_type: WireMessageType,
+        payload: bytes,
+        recipient_public_key: Optional[PublicKey] = None,
+        flags: int = 0,
+    ) -> int:
+        """
+        Записать сообщение в поток.
+        
+        Returns:
+            Количество записанных байт
+        """
+        return await self.stream_writer.write_message(
+            writer, msg_type, payload, recipient_public_key, flags
+        )
+    
+    @staticmethod
+    def is_binary_protocol(data: bytes) -> bool:
+        """
+        Проверить, является ли данные бинарным протоколом.
+        
+        [MIGRATION] Используется для определения формата
+        входящего соединения.
+        
+        Returns:
+            True если начинается с Magic b'ZE'
+        """
+        return len(data) >= 2 and data[:2] == MAGIC
+    
+    @staticmethod
+    def message_type_from_legacy(legacy_type: MessageType) -> WireMessageType:
+        """
+        Конвертировать legacy MessageType в WireMessageType.
+        
+        [MIGRATION] Для совместимости при переходе.
+        """
+        mapping = {
+            MessageType.PING: WireMessageType.PING,
+            MessageType.PONG: WireMessageType.PONG,
+            MessageType.DISCOVER: WireMessageType.DISCOVER,
+            MessageType.PEER_LIST: WireMessageType.PEER_LIST,
+            MessageType.DATA: WireMessageType.DATA,
+            MessageType.STREAM: WireMessageType.STREAM,
+            MessageType.CACHE_REQUEST: WireMessageType.CACHE_REQUEST,
+            MessageType.CACHE_RESPONSE: WireMessageType.CACHE_RESPONSE,
+            MessageType.IOU: WireMessageType.IOU,
+            MessageType.IOU_ACK: WireMessageType.IOU_ACK,
+            MessageType.BALANCE_CLAIM: WireMessageType.BALANCE_CLAIM,
+            MessageType.BALANCE_ACK: WireMessageType.BALANCE_ACK,
+            MessageType.SERVICE_REQUEST: WireMessageType.SERVICE_REQUEST,
+            MessageType.SERVICE_RESPONSE: WireMessageType.SERVICE_RESPONSE,
+            MessageType.SERVICE_LIST: WireMessageType.SERVICE_LIST,
+            MessageType.CONTRACT: WireMessageType.CONTRACT,
+            MessageType.CONTRACT_RESULT: WireMessageType.CONTRACT_RESULT,
+            MessageType.VPN_CONNECT: WireMessageType.VPN_CONNECT,
+            MessageType.VPN_CONNECT_RESULT: WireMessageType.VPN_CONNECT_RESULT,
+            MessageType.VPN_DATA: WireMessageType.VPN_DATA,
+            MessageType.VPN_CLOSE: WireMessageType.VPN_CLOSE,
+        }
+        return mapping.get(legacy_type, WireMessageType.DATA)
 
 
 class BlockingTransport:

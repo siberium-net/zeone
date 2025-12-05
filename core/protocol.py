@@ -6,15 +6,23 @@ Protocol Layer - Обработчики сообщений и Ping-Pong прот
 1. Ping-Pong протокол с верификацией подписей
 2. Discovery протокол для поиска пиров
 3. Базовые обработчики сообщений
+4. [NEW] Интеграция с ReplayProtector (persistent nonce storage)
+5. [NEW] Интеграция с WeightedTrustScore (slash on invalid merkle)
 
 [DECENTRALIZATION] Все сообщения верифицируются криптографически.
 PONG возвращается ТОЛЬКО если подпись PING валидна.
 Это защищает от спуфинга и replay-атак.
+
+[HARD FORK] Wire Protocol V1:
+- Бинарный формат заголовка (98 bytes)
+- Magic b'ZE' обязателен
+- См. core/wire.py для спецификации
 """
 
 import time
 import os
 import base64
+import logging
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Callable, Awaitable, Any, TYPE_CHECKING
 from abc import ABC, abstractmethod
@@ -23,6 +31,10 @@ from .transport import Message, MessageType, Crypto
 
 if TYPE_CHECKING:
     from .node import Peer
+    from core.security.replay import ReplayProtector
+    from economy.trust import WeightedTrustScore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -106,6 +118,7 @@ class PingPongHandler(MessageHandler):
        - Подпись валидна
        - timestamp не слишком старый (защита от replay)
        - sender_id соответствует подписи
+       - [NEW] nonce не использовался ранее (persistent replay protection)
     
     3. Если все проверки пройдены, узел B отправляет PONG:
        - original_nonce: nonce из PING
@@ -116,6 +129,9 @@ class PingPongHandler(MessageHandler):
     - Проверить, что пир владеет заявленным приватным ключом
     - Измерить latency соединения
     - Обнаружить "мертвые" узлы
+    
+    [PERSISTENCE] Nonces сохраняются в SQLite через ReplayProtector.
+    Защита работает даже после перезагрузки узла.
     """
     
     # Максимальный возраст PING сообщения (секунды)
@@ -137,6 +153,7 @@ class PingPongHandler(MessageHandler):
         [SECURITY] PONG возвращается ТОЛЬКО если:
         1. Подпись PING валидна
         2. Timestamp не слишком старый
+        3. [NEW] Nonce не использовался ранее (persistent check)
         
         Это предотвращает:
         - Спуфинг (подделка отправителя)
@@ -146,6 +163,7 @@ class PingPongHandler(MessageHandler):
         if not crypto.verify_signature(message):
             # [SECURITY] Отклоняем сообщение с невалидной подписью
             # Не отправляем ответ - это может быть попытка атаки
+            logger.warning(f"[PING] Invalid signature from {message.sender_id[:8]}...")
             return None
         
         # Проверка 2: Возраст сообщения
@@ -153,7 +171,28 @@ class PingPongHandler(MessageHandler):
         if age > self.MAX_PING_AGE:
             # [SECURITY] Сообщение слишком старое
             # Возможная replay-атака
+            logger.warning(f"[PING] Message too old ({age:.1f}s) from {message.sender_id[:8]}...")
             return None
+        
+        # Проверка 3: [NEW] Persistent replay protection
+        replay_protector: Optional["ReplayProtector"] = context.get("replay_protector")
+        if replay_protector and message.nonce:
+            nonce_bytes = base64.b64decode(message.nonce)
+            if not await replay_protector.is_nonce_fresh(nonce_bytes):
+                # [SECURITY] Replay attack detected!
+                logger.warning(f"[PING] Replay attack detected from {message.sender_id[:8]}...")
+                
+                # Update trust score if available
+                trust_system: Optional["WeightedTrustScore"] = context.get("trust_system")
+                if trust_system:
+                    from economy.trust import TrustEvent
+                    await trust_system.record_event(
+                        message.sender_id,
+                        TrustEvent.INVALID_MESSAGE,
+                        magnitude=2.0,  # Double penalty for replay
+                    )
+                
+                return None
         
         # Все проверки пройдены - создаем PONG
         pong = Message(
@@ -164,6 +203,15 @@ class PingPongHandler(MessageHandler):
             },
             sender_id=crypto.node_id,
         )
+        
+        # Update trust score for successful ping
+        trust_system: Optional["WeightedTrustScore"] = context.get("trust_system")
+        if trust_system:
+            from economy.trust import TrustEvent
+            await trust_system.record_event(
+                message.sender_id,
+                TrustEvent.PING_RESPONDED,
+            )
         
         # Подписываем ответ
         return crypto.sign_message(pong)
@@ -651,7 +699,13 @@ class CacheRequestHandler(MessageHandler):
 
 
 class CacheResponseHandler(MessageHandler):
-    """Обработчик ответов на кэш-запросы."""
+    """
+    Обработчик ответов на кэш-запросы.
+    
+    [SECURITY] Интеграция с Merkle verification и Trust slashing:
+    - При получении чанка проверяется Merkle proof
+    - При INVALID_MERKLE_PROOF -> мгновенный slashing пира
+    """
 
     @property
     def message_type(self) -> MessageType:
@@ -669,5 +723,122 @@ class CacheResponseHandler(MessageHandler):
         amplifier = context.get("amplifier")
         if amplifier:
             payload = message.payload or {}
+            
+            # [SECURITY] Check for merkle verification result
+            merkle_valid = payload.get("merkle_valid")
+            if merkle_valid is False:
+                # SLASHING: Invalid merkle proof detected
+                logger.error(
+                    f"[CACHE] INVALID_MERKLE_PROOF from {message.sender_id[:8]}... "
+                    f"chunk_hash={payload.get('hash', 'unknown')}"
+                )
+                
+                # Slash the peer
+                trust_system: Optional["WeightedTrustScore"] = context.get("trust_system")
+                if trust_system:
+                    from economy.trust import TrustEvent
+                    await trust_system.record_event(
+                        message.sender_id,
+                        TrustEvent.INVALID_MERKLE_PROOF,
+                    )
+                    logger.warning(f"[CACHE] Peer {message.sender_id[:8]}... SLASHED for invalid merkle proof")
+                
+                # Do NOT process the chunk
+                return None
+            
             await amplifier.handle_cache_response(payload)
         return None
+
+
+# ============================================================================
+# Helper functions for security integration
+# ============================================================================
+
+async def verify_message_security(
+    message: Message,
+    crypto: Crypto,
+    context: Dict[str, Any],
+) -> bool:
+    """
+    Комплексная проверка безопасности сообщения.
+    
+    [SECURITY] Проверяет:
+    1. Подпись сообщения
+    2. Возраст сообщения (MAX_AGE = 60s)
+    3. Replay protection (persistent nonce check)
+    4. Trust score пира (не в blacklist)
+    
+    Args:
+        message: Сообщение для проверки
+        crypto: Криптомодуль
+        context: Контекст с replay_protector и trust_system
+    
+    Returns:
+        True если сообщение прошло все проверки
+    """
+    MAX_MESSAGE_AGE = 60.0
+    
+    # Check 1: Signature
+    if not crypto.verify_signature(message):
+        logger.warning(f"[SECURITY] Invalid signature from {message.sender_id[:8]}...")
+        return False
+    
+    # Check 2: Age
+    age = time.time() - message.timestamp
+    if age > MAX_MESSAGE_AGE:
+        logger.warning(f"[SECURITY] Message too old ({age:.1f}s) from {message.sender_id[:8]}...")
+        return False
+    
+    # Check 3: Replay protection
+    replay_protector: Optional["ReplayProtector"] = context.get("replay_protector")
+    if replay_protector and message.nonce:
+        try:
+            nonce_bytes = base64.b64decode(message.nonce)
+            if not await replay_protector.is_nonce_fresh(nonce_bytes):
+                logger.warning(f"[SECURITY] Replay attack from {message.sender_id[:8]}...")
+                return False
+        except Exception as e:
+            logger.error(f"[SECURITY] Nonce check error: {e}")
+    
+    # Check 4: Trust blacklist
+    trust_system: Optional["WeightedTrustScore"] = context.get("trust_system")
+    if trust_system:
+        if trust_system.is_blacklisted(message.sender_id):
+            logger.warning(f"[SECURITY] Blacklisted peer {message.sender_id[:8]}...")
+            return False
+    
+    return True
+
+
+async def slash_peer_for_merkle_violation(
+    peer_id: str,
+    context: Dict[str, Any],
+    chunk_info: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Слэшинг пира за нарушение Merkle verification.
+    
+    [SECURITY] Вызывается из P2PLoader при обнаружении
+    невалидного Merkle proof.
+    
+    Args:
+        peer_id: ID нарушившего пира
+        context: Контекст с trust_system
+        chunk_info: Информация о чанке (для логирования)
+    """
+    trust_system: Optional["WeightedTrustScore"] = context.get("trust_system")
+    if trust_system:
+        from economy.trust import TrustEvent
+        await trust_system.record_event(
+            peer_id,
+            TrustEvent.INVALID_MERKLE_PROOF,
+        )
+        
+        chunk_desc = ""
+        if chunk_info:
+            chunk_desc = f" chunk={chunk_info.get('index', '?')}"
+        
+        logger.error(
+            f"[SECURITY] SLASHED peer {peer_id[:8]}... "
+            f"for INVALID_MERKLE_PROOF{chunk_desc}"
+        )
