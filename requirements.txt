@@ -28,6 +28,11 @@ aiofiles
 # Sandbox for contracts (optional)
 RestrictedPython
 
+# Blockchain/Web3 (for smart contract interaction)
+web3>=6.0.0
+py-solc-x>=2.0.0
+eth-account>=0.10.0
+
 # Distributed AI Inference
 numpy>=1.24.0
 chromadb
