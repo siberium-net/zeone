@@ -8,6 +8,22 @@ venv/
 env/
 .venv/
 
+# Build artifacts
+dist/
+*.egg-info/
+*.egg
+.eggs/
+*.whl
+*.tar.gz
+MANIFEST
+
+# PyInstaller output (but keep .spec source files)
+build/*/
+build/*.manifest
+build/*.exe
+build/*.dll
+!build/*.spec
+
 # Database
 *.db
 *.db-shm
@@ -37,3 +53,35 @@ data/
 *.cache/
 vector_store/
 docs/build/
+
+# Test & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+test-results.xml
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Linting
+.ruff_cache/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary
+*.tmp
+*.temp
+*.bak
+*~
