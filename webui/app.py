@@ -1315,8 +1315,11 @@ class P2PWebUI:
                     
                     ui.separator()
                     ui.label('Compliance').classes('font-bold mt-4')
-                    comp_toggle = ui.checkbox('Enable Legal/PII Checks (Requires Restart)', value=False)
-                    comp_toggle.on_change(self._toggle_compliance)
+                    ui.checkbox(
+                        'Enable Legal/PII Checks (Requires Restart)', 
+                        value=False,
+                        on_change=self._toggle_compliance
+                    )
                     
                     ui.separator()
                     

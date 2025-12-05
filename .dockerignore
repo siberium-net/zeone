@@ -1,0 +1,76 @@
+# ============================================================================
+# Docker Ignore - Exclude from build context
+# ============================================================================
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+*.egg
+.venv
+venv
+ENV
+env
+.pytest_cache
+.coverage
+htmlcov
+.mypy_cache
+.ruff_cache
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Build artifacts
+build
+dist
+*.spec
+
+# Documentation
+docs/build
+*.md
+!README.md
+
+# Tests (not needed in production image)
+tests
+.coveragerc
+
+# Data & Logs (mounted as volumes)
+data
+logs
+*.db
+*.log
+
+# Secrets (never include!)
+.env
+.env.*
+*.pem
+*.key
+identity.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI/CD
+.github
+.gitlab-ci.yml
+
+# Contracts (Solidity source not needed in runtime)
+contracts/*.sol
+
+# Heavy AI libraries marker
+requirements/ai.txt
+

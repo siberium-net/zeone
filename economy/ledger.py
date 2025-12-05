@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
+import aiosqlite
 from core.utils.async_db import connect as async_connect
 
 from config import config

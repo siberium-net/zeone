@@ -1,0 +1,415 @@
+# ============================================================================
+# THE FACTORY - Release Build & Publish Pipeline
+# ============================================================================
+#
+# [TRIGGER] Runs ONLY when a version tag is pushed (v*.*.*)
+# [PURPOSE] Build binaries, Docker images, and create GitHub releases
+#
+# [OUTPUTS]
+#   1. Linux binary: zeone-linux-amd64
+#   2. Windows binary: zeone-win64.exe
+#   3. macOS binary: zeone-macos-amd64
+#   4. Docker image: ghcr.io/siberium-net/zeone:tag
+#   5. GitHub Release with changelog
+#
+# ============================================================================
+
+name: "[FACTORY] Release Build"
+
+on:
+  push:
+    tags:
+      - "v*.*.*"  # Matches v1.0.0, v2.1.3, etc.
+
+# Permissions for GITHUB_TOKEN
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  PYTHON_VERSION: "3.10"
+
+jobs:
+  # ==========================================================================
+  # VERSION - Extract Version Info
+  # ==========================================================================
+  version:
+    name: "[VERSION] Extract Tag Info"
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      version_short: ${{ steps.get_version.outputs.version_short }}
+      
+    steps:
+      - name: "[TAG] Extract Version from Tag"
+        id: get_version
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_short=${VERSION%.*}" >> $GITHUB_OUTPUT
+          echo "[INFO] Building release $VERSION"
+
+  # ==========================================================================
+  # TEST - Run Tests Before Release
+  # ==========================================================================
+  test:
+    name: "[TEST] Pre-Release Validation"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: "[CHECKOUT] Clone Repository"
+        uses: actions/checkout@v4
+
+      - name: "[PYTHON] Setup Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: "[INSTALL] Install Dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/core.txt
+          pip install -r requirements/dev.txt
+
+      - name: "[TEST] Run Test Suite"
+        run: |
+          pytest tests/ -v --timeout=120
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+  # ==========================================================================
+  # BUILD BINARIES - Cross-Platform Compilation
+  # ==========================================================================
+  build-binary:
+    name: "[BUILD] ${{ matrix.os }} Binary"
+    runs-on: ${{ matrix.os }}
+    needs: [version, test]
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: zeone-linux-amd64
+            asset_name: zeone-linux-amd64
+            
+          - os: windows-latest
+            artifact_name: zeone.exe
+            asset_name: zeone-win64.exe
+            
+          - os: macos-latest
+            artifact_name: zeone-macos
+            asset_name: zeone-macos-amd64
+
+    steps:
+      - name: "[CHECKOUT] Clone Repository"
+        uses: actions/checkout@v4
+
+      - name: "[PYTHON] Setup Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: "[INSTALL] Install Dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/core.txt
+          pip install pyinstaller
+
+      - name: "[BUILD] Build with PyInstaller (Linux/macOS)"
+        if: runner.os != 'Windows'
+        run: |
+          pyinstaller \
+            --onefile \
+            --name ${{ matrix.artifact_name }} \
+            --add-data "config.py:." \
+            --hidden-import=aiohttp \
+            --hidden-import=aiosqlite \
+            --hidden-import=nacl \
+            --hidden-import=web3 \
+            --hidden-import=engineio \
+            --hidden-import=socketio \
+            --exclude-module=torch \
+            --exclude-module=transformers \
+            --exclude-module=chromadb \
+            --exclude-module=insightface \
+            --clean \
+            main.py
+
+      - name: "[BUILD] Build with PyInstaller (Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller `
+            --onefile `
+            --name zeone `
+            --add-data "config.py;." `
+            --hidden-import=aiohttp `
+            --hidden-import=aiosqlite `
+            --hidden-import=nacl `
+            --hidden-import=web3 `
+            --hidden-import=engineio `
+            --hidden-import=socketio `
+            --exclude-module=torch `
+            --exclude-module=transformers `
+            --exclude-module=chromadb `
+            --exclude-module=insightface `
+            --clean `
+            main.py
+
+      - name: "[RENAME] Rename Artifact"
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            mv dist/zeone.exe dist/${{ matrix.asset_name }}
+          else
+            mv dist/${{ matrix.artifact_name }} dist/${{ matrix.asset_name }} || true
+          fi
+          ls -la dist/
+
+      - name: "[UPLOAD] Upload Binary Artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+          retention-days: 5
+
+  # ==========================================================================
+  # BUILD DOCKER - Container Image
+  # ==========================================================================
+  build-docker:
+    name: "[DOCKER] Build & Push Image"
+    runs-on: ubuntu-latest
+    needs: [version, test]
+    
+    steps:
+      - name: "[CHECKOUT] Clone Repository"
+        uses: actions/checkout@v4
+
+      - name: "[DOCKER] Setup Buildx"
+        uses: docker/setup-buildx-action@v3
+
+      - name: "[AUTH] Login to GitHub Container Registry"
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "[META] Extract Docker Metadata"
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/tags/{0}', github.event.ref) }}
+
+      - name: "[CREATE] Generate Dockerfile"
+        run: |
+          cat > Dockerfile << 'EOF'
+          # ============================================================================
+          # ZEONE Node - Production Docker Image
+          # ============================================================================
+          
+          FROM python:3.10-slim-bookworm AS base
+          
+          # Environment
+          ENV PYTHONDONTWRITEBYTECODE=1 \
+              PYTHONUNBUFFERED=1 \
+              PIP_NO_CACHE_DIR=1 \
+              PIP_DISABLE_PIP_VERSION_CHECK=1
+          
+          WORKDIR /app
+          
+          # System dependencies
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              gcc \
+              libffi-dev \
+              libssl-dev \
+              && rm -rf /var/lib/apt/lists/*
+          
+          # Python dependencies (core only, no AI)
+          COPY requirements/core.txt requirements/core.txt
+          RUN pip install --no-cache-dir -r requirements/core.txt
+          
+          # Application code
+          COPY . .
+          
+          # Create non-root user
+          RUN useradd --create-home --shell /bin/bash zeone && \
+              chown -R zeone:zeone /app
+          
+          USER zeone
+          
+          # Volumes for data persistence
+          VOLUME ["/app/data", "/app/logs"]
+          
+          # Expose ports
+          # P2P: 8468, WebUI: 8080, SOCKS5: 1080
+          EXPOSE 8468 8080 1080
+          
+          # Health check
+          HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+              CMD python -c "import socket; s=socket.socket(); s.connect(('localhost',8468)); s.close()" || exit 1
+          
+          # Entry point
+          ENTRYPOINT ["python", "main.py"]
+          CMD ["--port", "8468"]
+          EOF
+
+      - name: "[BUILD] Build and Push Docker Image"
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  # ==========================================================================
+  # CHANGELOG - Generate Release Notes
+  # ==========================================================================
+  changelog:
+    name: "[CHANGELOG] Generate Release Notes"
+    runs-on: ubuntu-latest
+    needs: version
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+      
+    steps:
+      - name: "[CHECKOUT] Clone Repository"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog
+
+      - name: "[GENERATE] Create Changelog"
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          
+          echo "## What's Changed in $CURRENT_TAG" > CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          
+          if [ -n "$PREV_TAG" ]; then
+            echo "### Commits since $PREV_TAG" >> CHANGELOG.md
+            echo "" >> CHANGELOG.md
+            git log --oneline --no-merges ${PREV_TAG}..HEAD | while read line; do
+              echo "- $line" >> CHANGELOG.md
+            done
+          else
+            echo "### Initial Release" >> CHANGELOG.md
+            echo "" >> CHANGELOG.md
+            git log --oneline --no-merges -20 | while read line; do
+              echo "- $line" >> CHANGELOG.md
+            done
+          fi
+          
+          echo "" >> CHANGELOG.md
+          echo "---" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "### Installation" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo '```bash' >> CHANGELOG.md
+          echo "# Linux" >> CHANGELOG.md
+          echo "wget https://github.com/${{ github.repository }}/releases/download/$CURRENT_TAG/zeone-linux-amd64" >> CHANGELOG.md
+          echo "chmod +x zeone-linux-amd64" >> CHANGELOG.md
+          echo "./zeone-linux-amd64 --help" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "# Docker" >> CHANGELOG.md
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${CURRENT_TAG#v}" >> CHANGELOG.md
+          echo '```' >> CHANGELOG.md
+          
+          # Output for release
+          {
+            echo 'changelog<<EOF'
+            cat CHANGELOG.md
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+          
+          cat CHANGELOG.md
+
+  # ==========================================================================
+  # RELEASE - Create GitHub Release
+  # ==========================================================================
+  release:
+    name: "[RELEASE] Publish GitHub Release"
+    runs-on: ubuntu-latest
+    needs: [version, build-binary, build-docker, changelog]
+    
+    steps:
+      - name: "[CHECKOUT] Clone Repository"
+        uses: actions/checkout@v4
+
+      - name: "[DOWNLOAD] Download All Artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: "[PREPARE] List Artifacts"
+        run: |
+          echo "=== Downloaded Artifacts ==="
+          find ./artifacts -type f -ls
+          
+          # Move to flat structure
+          mkdir -p ./release
+          find ./artifacts -type f -exec mv {} ./release/ \;
+          ls -la ./release/
+
+      - name: "[CHECKSUM] Generate SHA256 Checksums"
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: "[PUBLISH] Create GitHub Release"
+        uses: softprops/action-gh-release@v1
+        with:
+          name: "ZEONE v${{ needs.version.outputs.version }}"
+          body: ${{ needs.changelog.outputs.changelog }}
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          files: |
+            ./release/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ==========================================================================
+  # NOTIFY - Release Notification
+  # ==========================================================================
+  notify:
+    name: "[NOTIFY] Release Complete"
+    runs-on: ubuntu-latest
+    needs: [version, release]
+    if: success()
+    
+    steps:
+      - name: "[SUMMARY] Release Summary"
+        run: |
+          echo "=================================================="
+          echo "[OK] ZEONE v${{ needs.version.outputs.version }} Released!"
+          echo "=================================================="
+          echo ""
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.version.outputs.version }}"
+          echo ""
+          echo "Docker Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}"
+          echo ""
+          echo "Binaries:"
+          echo "  - zeone-linux-amd64"
+          echo "  - zeone-win64.exe"  
+          echo "  - zeone-macos-amd64"
+          echo ""
+          echo "=================================================="
+
