@@ -2,8 +2,8 @@
   "node_id": "8vXtoiVlOg0KauYeTisHyF/mKPiB4exfMmdiEQkXM/s=",
   "host": "0.0.0.0",
   "port": 8468,
-  "created_at": 1764865119.322921,
-  "last_saved": 1764865119.3229616,
+  "created_at": 1764948657.806984,
+  "last_saved": 1764948657.80702,
   "uptime_total": 0.0,
   "peers": {
     "8vXtoiVlOg0KauYeTisHyF/mKPiB4exfMmdiEQkXM/s=": {
@@ -12,7 +12,7 @@
       "port": 8468,
       "first_seen": 0.0,
       "last_seen": 0.0,
-      "last_connected": 1764865119.322942,
+      "last_connected": 1764948657.8070045,
       "connection_count": 0,
       "failed_connections": 0,
       "trust_score": 0.5,
@@ -32,5 +32,5 @@
   "total_messages_received": 0,
   "total_bytes_sent": 0,
   "total_bytes_received": 0,
-  "_backup_time": 1764865119.3296423
+  "_backup_time": 1764948657.8303437
 }

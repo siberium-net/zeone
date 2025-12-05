@@ -1,0 +1,14 @@
+# ZEONE WebUI Dependencies
+# ========================
+# NiceGUI-based web interface
+# Install: pip install -r requirements/webui.txt
+
+# NiceGUI framework
+nicegui>=1.4.0
+
+# Plotting (optional)
+plotly>=5.18.0
+
+# WebSocket support (usually included with nicegui)
+python-socketio>=5.10.0
+

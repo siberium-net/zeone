@@ -1,0 +1,43 @@
+# ZEONE Core Dependencies
+# =======================
+# Minimal dependencies for P2P node operation
+# Install: pip install -r requirements/core.txt
+# Size: ~100MB
+
+# Async HTTP client/server
+aiohttp>=3.9.0
+
+# Async console input
+aioconsole>=0.7.0
+
+# Environment configuration (.env files)
+python-dotenv>=1.0.0
+
+# Cryptography (Ed25519, Curve25519, NaCl)
+pynacl>=1.5.0
+
+# Colored terminal output
+colorama>=0.4.6
+
+# Async SQLite for ledger
+aiosqlite>=0.20.0
+
+# Async file operations
+aiofiles>=23.2.0
+
+# Base58 encoding (for peer IDs)
+base58>=2.1.0
+
+# Network interface discovery
+netifaces>=0.11.0
+
+# Blockchain/Web3 (for smart contract interaction)
+web3>=6.0.0
+eth-account>=0.10.0
+
+# System monitoring
+psutil>=5.9.0
+
+# HTML parsing for web_reader agent
+beautifulsoup4>=4.12.0
+

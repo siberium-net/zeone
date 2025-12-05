@@ -808,6 +808,7 @@ class AgentManager:
     
     def _register_builtin_agents(self) -> None:
         """Зарегистрировать встроенных агентов."""
+        # Core agents (always available)
         self.register_agent(EchoAgent())
         self.register_agent(StorageAgent())
         self.register_agent(ComputeAgent())
@@ -828,19 +829,70 @@ class AgentManager:
         except ImportError as e:
             logger.warning(f"[AGENTS] ReaderAgent not available: {e}")
         
+        # AI Agents - register via lazy loader (only if dependencies available)
+        self._register_ai_agents()
+    
+    def _register_ai_agents(self) -> None:
+        """
+        Register AI agents with lazy loading.
+        
+        [LITE MODE] If AI libraries (torch, transformers) are not installed,
+        these agents are skipped and node runs in LITE mode.
+        """
+        try:
+            from core.lazy_imports import (
+                is_ai_available, 
+                AI_STATUS,
+                check_ai_availability,
+            )
+            
+            check_ai_availability()
+            
+            if not is_ai_available():
+                logger.info("[AGENTS] AI Module not found. Running in LITE mode.")
+                logger.info("[AGENTS]   Node operates as VPN/Storage/Wallet only.")
+                logger.info("[AGENTS]   To enable AI: pip install -r requirements/ai.txt")
+                return
+            
+        except ImportError:
+            # lazy_imports module not available, try direct imports
+            pass
+        
         # Cloud LLM Agent - облачный AI (OpenAI-compatible)
         try:
             from .ai_assistant import LlmAgent
             self.register_agent(LlmAgent())
         except ImportError as e:
-            logger.warning(f"[AGENTS] LlmAgent not available: {e}")
+            logger.debug(f"[AGENTS] LlmAgent not available: {e}")
+        except Exception as e:
+            logger.warning(f"[AGENTS] Failed to init LlmAgent: {e}")
         
         # Local LLM Agent - локальный AI (Ollama/GPU)
         try:
             from .local_llm import OllamaAgent
             self.register_agent(OllamaAgent())
         except ImportError as e:
-            logger.warning(f"[AGENTS] OllamaAgent not available: {e}")
+            logger.debug(f"[AGENTS] OllamaAgent not available: {e}")
+        except Exception as e:
+            logger.warning(f"[AGENTS] Failed to init OllamaAgent: {e}")
+        
+        # Vision Agent (if insightface available)
+        try:
+            from .vision import VisionAgent
+            self.register_agent(VisionAgent())
+        except ImportError as e:
+            logger.debug(f"[AGENTS] VisionAgent not available: {e}")
+        except Exception as e:
+            logger.debug(f"[AGENTS] VisionAgent init skipped: {e}")
+        
+        # NeuroLink Agent (tensor transport)
+        try:
+            from .neuro_link import NeuroLinkAgent
+            self.register_agent(NeuroLinkAgent())
+        except ImportError as e:
+            logger.debug(f"[AGENTS] NeuroLinkAgent not available: {e}")
+        except Exception as e:
+            logger.debug(f"[AGENTS] NeuroLinkAgent init skipped: {e}")
     
     def register_agent(self, agent: BaseAgent) -> None:
         """

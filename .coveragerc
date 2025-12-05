@@ -1,0 +1,165 @@
+# ZEONE Coverage Configuration
+# =============================
+#
+# Usage:
+#   pytest --cov=. --cov-config=.coveragerc --cov-report=html
+#   coverage report -m
+#   coverage html && open htmlcov/index.html
+
+[run]
+# Source directories to measure
+source = 
+    core
+    economy
+    agents
+    cortex
+
+# Branch coverage (measure if/else paths)
+branch = True
+
+# Parallel mode for async tests
+parallel = True
+
+# Context for identifying test source
+dynamic_context = test_function
+
+# Data file location
+data_file = .coverage
+
+# Omit patterns
+omit = 
+    # Tests themselves
+    tests/*
+    */tests/*
+    test_*.py
+    *_test.py
+    conftest.py
+    
+    # Build and scripts
+    scripts/*
+    build/*
+    setup.py
+    setup.cfg
+    
+    # Virtual environments
+    venv/*
+    .venv/*
+    env/*
+    .env/*
+    */site-packages/*
+    
+    # GUI code (hard to test without browser)
+    webui/*
+    
+    # Documentation
+    docs/*
+    
+    # Third-party contracts
+    contracts/*
+    
+    # Cache and generated
+    __pycache__/*
+    .pytest_cache/*
+    *.pyc
+    
+    # Migration files
+    migrations/*
+
+[paths]
+# Map different paths to source
+source = 
+    .
+    /home/*/src/zeone
+
+[report]
+# Show missing lines
+show_missing = True
+
+# Precision for percentages
+precision = 2
+
+# Minimum coverage threshold (CI fails below this)
+# Set to 20 initially, increase as more tests are written
+# Target: 80% for production
+fail_under = 20
+
+# Skip files with no code
+skip_empty = True
+
+# Exclude lines from coverage
+exclude_lines = 
+    # Standard exclusions
+    pragma: no cover
+    
+    # Debug/development code
+    def __repr__
+    def __str__
+    
+    # Abstract methods
+    @abstractmethod
+    @abc.abstractmethod
+    raise NotImplementedError
+    
+    # Type checking blocks
+    if TYPE_CHECKING:
+    if typing.TYPE_CHECKING:
+    
+    # Defensive assertions
+    assert False
+    raise AssertionError
+    
+    # Unreachable code markers
+    if False:
+    if 0:
+    
+    # Platform-specific code
+    if sys.platform
+    if platform.system
+    
+    # Optional imports
+    except ImportError
+    except ModuleNotFoundError
+    
+    # Main guard
+    if __name__ == .__main__.:
+    
+    # Logging-only code
+    logger.debug
+    logging.debug
+
+# Ignore files with these patterns in coverage report
+ignore_errors = True
+
+# Partial branches that are OK to miss
+partial_branches = 
+    pragma: no branch
+    if TYPE_CHECKING:
+    if typing.TYPE_CHECKING:
+
+[html]
+# HTML report directory
+directory = htmlcov
+
+# Title for HTML report
+title = ZEONE Coverage Report
+
+# Show contexts in HTML
+show_contexts = True
+
+# Extra CSS (optional)
+# extra_css = docs/coverage.css
+
+[xml]
+# XML report for CI systems (Codecov, etc.)
+output = coverage.xml
+
+[json]
+# JSON report
+output = coverage.json
+pretty_print = True
+show_contexts = True
+
+[lcov]
+# LCOV format for some CI systems
+output = coverage.lcov
+

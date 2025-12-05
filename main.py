@@ -111,6 +111,21 @@ try:
 except ImportError:
     CORTEX_AVAILABLE = False
 
+# AI Module Lazy Loading
+try:
+    from core.lazy_imports import (
+        is_ai_available, 
+        get_ai_mode, 
+        log_ai_status,
+        AI_STATUS,
+    )
+    LAZY_IMPORTS_AVAILABLE = True
+except ImportError:
+    LAZY_IMPORTS_AVAILABLE = False
+    def is_ai_available(): return False
+    def get_ai_mode(): return "LITE"
+    def log_ai_status(): pass
+
 
 # Настройка логирования
 logging.basicConfig(
@@ -1399,9 +1414,14 @@ Examples:
     await ledger.initialize()
     logger.info(f"[LEDGER] Initialized: {args.db}")
     
+    # [AI] Log AI module availability
+    if LAZY_IMPORTS_AVAILABLE:
+        log_ai_status()
+    
     # [MARKET] Инициализируем AgentManager с Ledger и node_id
     agent_manager = AgentManager(ledger=ledger, node_id=crypto.node_id)
     logger.info(f"[AGENTS] Initialized with services: {list(agent_manager._agents.keys())}")
+    logger.info(f"[MODE] Running in {get_ai_mode()} mode")
     try:
         from agents.cache_provider import CacheProviderAgent
         cache_agent = CacheProviderAgent(amplifier=None)
