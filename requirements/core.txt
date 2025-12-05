@@ -28,9 +28,6 @@ aiofiles>=23.2.0
 # Base58 encoding (for peer IDs)
 base58>=2.1.0
 
-# Network interface discovery
-netifaces>=0.11.0
-
 # Blockchain/Web3 (for smart contract interaction)
 web3>=6.0.0
 eth-account>=0.10.0

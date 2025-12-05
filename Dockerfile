@@ -25,7 +25,7 @@ FROM python:3.10-slim-bookworm AS builder
 WORKDIR /build
 
 # [CRITICAL] Install build dependencies for C extensions
-# Required for: aiohttp (yarl, frozenlist), pynacl (libsodium), netifaces
+# Required for: aiohttp (yarl, frozenlist), pynacl (libsodium)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \

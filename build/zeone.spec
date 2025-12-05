@@ -62,7 +62,6 @@ HIDDEN_IMPORTS_CORE = [
     "nacl.secret",
     
     # Network
-    "netifaces",
     "dns",
     "dns.resolver",
     
