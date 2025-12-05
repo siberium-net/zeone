@@ -111,6 +111,15 @@ class WireMessageType(IntEnum):
     DHT_FIND_VALUE = 97
     DHT_STORE = 98
     DHT_RESPONSE = 99
+    
+    # Neural/Tensor (112-127) - Pipeline Parallelism
+    TENSOR_DATA = 112           # Tensor activation data
+    TENSOR_META = 113           # Tensor metadata (shape, dtype, etc.)
+    TENSOR_CHUNK = 114          # Chunked tensor fragment
+    TENSOR_CHUNK_ACK = 115      # Acknowledgment for chunk
+    PIPELINE_FORWARD = 116      # Forward pass request
+    PIPELINE_BACKWARD = 117     # Backward pass (gradients)
+    PIPELINE_SYNC = 118         # Synchronization barrier
 
 
 class WireError(Exception):
