@@ -3,9 +3,11 @@
 # Minimal dependencies for P2P node operation
 # Install: pip install -r requirements/core.txt
 # Size: ~100MB
+#
+# [AUDIT] 2025-01 - All packages verified for wheel availability
 
-# Async HTTP client/server
-aiohttp>=3.9.0
+# Async HTTP client/server (has wheels for all platforms)
+aiohttp>=3.9.0,<4.0.0
 
 # Async console input
 aioconsole>=0.7.0
@@ -14,6 +16,7 @@ aioconsole>=0.7.0
 python-dotenv>=1.0.0
 
 # Cryptography (Ed25519, Curve25519, NaCl)
+# [OK] Pre-built wheels available for all platforms
 pynacl>=1.5.0
 
 # Colored terminal output
@@ -29,12 +32,14 @@ aiofiles>=23.2.0
 base58>=2.1.0
 
 # Blockchain/Web3 (for smart contract interaction)
-web3>=6.0.0
-eth-account>=0.10.0
+web3>=6.15.0,<7.0.0
+eth-account>=0.11.0
 
-# System monitoring
+# System monitoring (replaces netifaces, has wheels)
 psutil>=5.9.0
 
 # HTML parsing for web_reader agent
 beautifulsoup4>=4.12.0
 
+# HTTP requests (transitive dep, but pin for security)
+requests>=2.31.0

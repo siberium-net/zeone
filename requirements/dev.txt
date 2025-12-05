@@ -2,28 +2,56 @@
 # ===============================
 # Tools for testing, documentation, and building
 # Install: pip install -r requirements/dev.txt
+#
+# [AUDIT] 2025-01 - Updated to modern tooling
 
+# ============================================================================
 # Testing
-pytest>=7.4.0
+# ============================================================================
+
+pytest>=8.0.0
 pytest-asyncio>=0.23.0
 pytest-cov>=4.1.0
 pytest-timeout>=2.2.0
 pytest-xdist>=3.5.0
 
+# ============================================================================
 # Documentation
+# ============================================================================
+
 sphinx>=7.2.0
 myst-parser>=2.0.0
 sphinx-rtd-theme>=2.0.0
 
+# ============================================================================
 # Building / Distribution
-pyinstaller>=6.0.0
+# ============================================================================
+
+pyinstaller>=6.3.0
 py-solc-x>=2.0.0
 
-# Code quality
-black>=23.0.0
-isort>=5.12.0
-flake8>=6.1.0
-mypy>=1.6.0
+# Build backend
+build>=1.0.0
+twine>=4.0.0
+
+# ============================================================================
+# Code Quality (Modern Stack)
+# ============================================================================
+
+# Ruff - fast linter + formatter (replaces black, isort, flake8)
+ruff>=0.1.9
+
+# Type checking
+mypy>=1.8.0
+
+# Legacy (optional, for CI compatibility)
+# black>=24.0.0
+# isort>=5.13.0
+# flake8>=7.0.0
+
+# ============================================================================
+# Utilities
+# ============================================================================
 
 # Git operations
 gitpython>=3.1.40
@@ -31,3 +59,5 @@ gitpython>=3.1.40
 # Package management
 packaging>=23.2
 
+# Environment management
+pip-tools>=7.3.0
