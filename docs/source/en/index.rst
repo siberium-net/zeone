@@ -17,3 +17,4 @@ Technical specification for the ZEONE decentralized P2P network.
    :caption: Appendix
 
    ../GAPS
+   ../GAPS_2.0
