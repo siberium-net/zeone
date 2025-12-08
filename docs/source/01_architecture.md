@@ -1,13 +1,15 @@
 # ZEONE Architecture
 
 ## Network Stack
-- **Transport:** Asyncio TCP/UDP with NaCl (Curve25519 + XSalsa20-Poly1305) for E2E encryption; Traffic masking for DPI evasion.
+- **Transport:** Binary Wire Protocol v1 (98-byte header, Magic 0x5A45) with NaCl (Curve25519 + XSalsa20-Poly1305) for E2E encryption; Traffic masking for DPI evasion. **[IMPLEMENTED]** Hard Fork - no JSON backward compatibility.
 - **Discovery & Storage:** Kademlia DHT (RoutingTable buckets, iterative lookups, STORE/FIND\_NODE/FIND\_VALUE).
 - **Protocol Router:** Ping-Pong handshake, discovery gossip, economy balance exchange.
+- **Neural Transport:** NeuroLink agent for distributed tensor transmission (Pipeline Parallelism).
 
 ## Crypto & Identity
 - Node identity = Ed25519 verify key (Base64). Signatures wrap all message fields (nonce, timestamp) to resist replay.
 - BlockingTransport consults Ledger to block leechers exceeding debt limit.
+- **Merkle Tree:** Chunk-level verification for P2P model distribution - instant corrupted data detection. **[IMPLEMENTED]**
 
 ## Persistence & Economy
 - Ledger (SQLite/async) tracks debts/claims, balances, IOU, trust scores.

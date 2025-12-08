@@ -11,9 +11,11 @@ The ZEONE core consists of three main layers:
 
 ## 1. Wire Protocol
 
-### 1.1 Current Implementation (Legacy)
+### 1.1 Legacy JSON Protocol [DEPRECATED]
 
-Current `SimpleTransport` uses a simple format:
+**[WARNING]** This protocol is DEPRECATED since version 2.0. Use Binary Wire Protocol (section 1.2).
+
+Legacy `SimpleTransport` used a simple format:
 
 ```
 ┌─────────────────┬──────────────────────────────────┐
@@ -39,9 +41,11 @@ Current `SimpleTransport` uses a simple format:
 - No protocol versioning
 - Missing magic number for stream identification
 
-### 1.2 [PROPOSED] Binary Wire Protocol v1
+### 1.2 Binary Wire Protocol v1 [CURRENT]
 
-A binary format is proposed for production:
+**[IMPLEMENTED]** Fully implemented in [`core/wire.py`](../../core/wire.py).
+
+Binary format for production with strict security requirements:
 
 ```
  0                   1                   2                   3
@@ -101,6 +105,18 @@ A binary format is proposed for production:
 | 0x50 | IOU | Bidirectional |
 | 0x51 | BALANCE_CLAIM | Request |
 | 0x52 | BALANCE_ACK | Response |
+
+### 1.2.1 Hard Fork Notice
+
+**[BREAKING CHANGE]** Binary Wire Protocol implements a Hard Fork:
+
+- **Magic Bytes Check:** Any data without Magic `b'ZE'` (0x5A45) → immediate socket closure
+- **No Backward Compatibility:** No backward compatibility with JSON protocol
+- **Version Validation:** Incompatible protocol versions are rejected instantly
+
+This prevents attacks via traffic forgery and ensures protocol purity at transport level.
+
+**Code:** [`core/wire.py:585-645`](../../core/wire.py) - `handle_incoming_connection()` with Magic check
 
 ### 1.3 Handshake Protocol
 

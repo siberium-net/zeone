@@ -489,102 +489,194 @@ class MessageType(Enum):
 
 ## 6. On-Chain Settlement
 
-### 6.1 ChainManager
+### 6.1 SiberiumManager (Native SIBR Token)
 
-Interface to EVM-compatible blockchain:
+Interface to Siberium blockchain with native SIBR token:
+
+**[KEY DIFFERENCE]** SIBR is the native gas token (like ETH on Ethereum). No ERC-20 contract - uses native transfers via `web3.eth.send_transaction`.
 
 ```python
-class ChainManager:
+class SiberiumManager:
     def __init__(
         self,
-        provider_uri: str,      # e.g., "https://mainnet.infura.io/v3/..."
-        private_key: str,       # Wallet private key
-        token_address: str,     # ZEO ERC-20 contract
+        rpc_url: str = None,           # https://rpc.siberium.net (mainnet) or https://rpc.test.siberium.net (testnet)
+        private_key: str = None,       # Wallet private key
+        settlement_address: str = None, # ZEOSettlement.sol contract address
+        network: SiberiumNetwork = None,
     ):
-        self.web3 = Web3(Web3.HTTPProvider(provider_uri))
-        self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        self.rpc_url = rpc_url or os.getenv("SIBERIUM_RPC_URL", SIBERIUM_TESTNET.rpc_url)
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
+        self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
         
         self.account = Account.from_key(private_key)
         self.address = self.account.address
         
-        self.token = self.web3.eth.contract(
-            address=Web3.to_checksum_address(token_address),
-            abi=ERC20_ABI,
-        )
-        self.decimals = self.token.functions.decimals().call()
+        # Native balance operations
+        balance_wei = self.w3.eth.get_balance(address)
+        balance_sibr = Decimal(balance_wei) / Decimal(10**18)
+        
+        # Settlement contract (for staking and claims)
+        if settlement_address:
+            self.settlement = self.w3.eth.contract(
+                address=Web3.to_checksum_address(settlement_address),
+                abi=SETTLEMENT_ABI,
+            )
 ```
 
-### 6.2 ERC-20 Interface
+**Code:** [`economy/chain.py`](economy/chain.py) - SiberiumManager
 
-Minimal ABI for settlement:
+### 6.2 Native SIBR Operations
 
-```json
-[
-  {
-    "constant": true,
-    "inputs": [{"name": "_owner", "type": "address"}],
-    "name": "balanceOf",
-    "outputs": [{"name": "balance", "type": "uint256"}],
-    "type": "function"
-  },
-  {
-    "constant": false,
-    "inputs": [
-      {"name": "_to", "type": "address"},
-      {"name": "_value", "type": "uint256"}
-    ],
-    "name": "transfer",
-    "outputs": [{"name": "", "type": "bool"}],
-    "type": "function"
-  },
-  {
-    "constant": false,
-    "inputs": [
-      {"name": "_spender", "type": "address"},
-      {"name": "_value", "type": "uint256"}
-    ],
-    "name": "approve",
-    "outputs": [{"name": "", "type": "bool"}],
-    "type": "function"
-  },
-  {
-    "constant": true,
-    "inputs": [],
-    "name": "decimals",
-    "outputs": [{"name": "", "type": "uint8"}],
-    "type": "function"
-  }
-]
-```
-
-### 6.3 Transfer Execution
+#### Get Balance
 
 ```python
-def transfer_token(self, to_addr: str, amount_tokens: Decimal) -> str:
+def get_balance(self, address: Optional[str] = None) -> Decimal:
     """
-    Execute ERC-20 transfer.
+    Get native SIBR balance.
     
     Args:
-        to_addr: Recipient wallet address
-        amount_tokens: Amount in token units (not wei)
+        address: Address to check (default: own address)
+    
+    Returns:
+        Balance in SIBR (not wei)
+    """
+    address = address or self.address
+    address = Web3.to_checksum_address(address)
+    wei = self.w3.eth.get_balance(address)
+    return Decimal(wei) / Decimal(10**18)
+```
+
+#### Native Transfer
+
+```python
+async def transfer(
+    self,
+    to_address: str,
+    amount: Decimal,
+    gas_price: Optional[int] = None,
+) -> str:
+    """
+    Transfer native SIBR tokens.
+    
+    Args:
+        to_address: Recipient address
+        amount: Amount in SIBR (not wei)
+        gas_price: Custom gas price (default: network gas price)
     
     Returns:
         Transaction hash
     """
-    to = Web3.to_checksum_address(to_addr)
-    amount_wei = int(amount_tokens * (10 ** self.decimals))
-    nonce = self.web3.eth.get_transaction_count(self.address)
+    to_address = Web3.to_checksum_address(to_address)
+    amount_wei = int(amount * Decimal(10**18))
     
-    tx = self.token.functions.transfer(to, amount_wei).build_transaction({
+    # Build transaction
+    tx = {
         "from": self.address,
-        "nonce": nonce,
-        "gasPrice": self.web3.eth.gas_price,
+        "to": to_address,
+        "value": amount_wei,
+        "nonce": self.w3.eth.get_transaction_count(self.address),
+        "gas": 21000,  # Standard transfer gas
+        "gasPrice": gas_price or self.w3.eth.gas_price,
+        "chainId": self.network.chain_id,
+    }
+    
+    # Sign and send
+    signed = self.account.sign_transaction(tx)
+    tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+    
+    return tx_hash.hex()
+```
+
+#### Settlement Contract Integration
+
+ZEOSettlement.sol allows:
+- **Deposit (payable):** Stake native SIBR
+- **Claim:** Claim settlement payment via signed IOU
+- **Unstake flow:** request_unstake -> wait 7 days -> withdraw
+
+**Code:** [`economy/chain.py:287-422`](economy/chain.py)
+
+### 6.3 Settlement Contract Operations
+
+#### Deposit Stake
+
+```python
+async def deposit_stake(self, amount: Decimal) -> str:
+    """
+    Deposit SIBR as stake in Settlement contract.
+    
+    Args:
+        amount: Amount in SIBR
+    
+    Returns:
+        Transaction hash
+    """
+    amount_wei = int(amount * Decimal(10**18))
+    
+    # Build deposit transaction (payable)
+    tx = self.settlement.functions.deposit().build_transaction({
+        "from": self.address,
+        "value": amount_wei,
+        "nonce": self.w3.eth.get_transaction_count(self.address),
+        "gas": 100000,
+        "gasPrice": self.w3.eth.gas_price,
+        "chainId": self.network.chain_id,
     })
     
     signed = self.account.sign_transaction(tx)
-    tx_hash = self.web3.eth.send_raw_transaction(signed.rawTransaction)
+    tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
     
     return tx_hash.hex()
+```
+
+#### Claim Settlement
+
+```python
+async def claim_settlement(
+    self,
+    payer: str,
+    amount: Decimal,
+    nonce: int,
+    deadline: int,
+    signature: bytes,
+) -> str:
+    """
+    Claim a settlement payment (as payee).
+    
+    Args:
+        payer: Address of the debtor
+        amount: Amount in SIBR
+        nonce: Nonce from signature
+        deadline: Signature deadline
+        signature: EIP-712 signature from payer
+    
+    Returns:
+        Transaction hash
+    """
+    payer = Web3.to_checksum_address(payer)
+    amount_wei = int(amount * Decimal(10**18))
+    
+    tx = self.settlement.functions.claim(
+        payer,
+        amount_wei,
+        nonce,
+        deadline,
+        signature,
+    ).build_transaction({
+        "from": self.address,
+        "nonce": self.w3.eth.get_transaction_count(self.address),
+        "gas": 150000,
+        "gasPrice": self.w3.eth.gas_price,
+        "chainId": self.network.chain_id,
+    })
+    
+    signed = self.account.sign_transaction(tx)
+    tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+    
+    return tx_hash.hex()
+```
+
+**Code:** [`economy/chain.py:287-532`](economy/chain.py)
 
 def wait_for_receipt(
     self,
@@ -649,7 +741,7 @@ class SettlementManager:
         tokens = Decimal(str(amount_credits)) * self.credit_rate
         
         try:
-            tx_hash = self.chain.transfer_token(peer_wallet, tokens)
+            tx_hash = await self.chain.transfer(peer_wallet, tokens)
             await self.ledger.record_settlement(peer_id, float(tokens), tx_hash)
             return tx_hash
         except Exception as e:
@@ -707,6 +799,43 @@ sequenceDiagram
     Chain-->>B: Confirmed
     B->>B: Update local balance
 ```
+
+### 6.6 Siberium Networks
+
+ZEONE uses Siberium blockchain for on-chain settlement:
+
+| Network | Chain ID | RPC URL | Explorer |
+|---------|----------|---------|----------|
+| Mainnet | 111111 | https://rpc.siberium.net | https://explorer.siberium.net |
+| Testnet | 111000 | https://rpc.test.siberium.net | https://explorer.test.siberium.net |
+
+**Features:**
+- Native gas token: SIBR (18 decimals)
+- EVM-compatible (uses Web3.py)
+- PoA consensus with geth_poa_middleware
+- Low gas fees for micropayments
+
+**Example connection:**
+
+```python
+from economy.chain import SiberiumManager, SIBERIUM_MAINNET, SIBERIUM_TESTNET
+
+# Testnet
+manager = SiberiumManager(
+    rpc_url="https://rpc.test.siberium.net",
+    private_key=os.getenv("WALLET_PRIVATE_KEY"),
+    settlement_address=os.getenv("SETTLEMENT_ADDRESS"),
+)
+
+# Check balance
+balance = manager.get_balance()
+print(f"Balance: {balance} SIBR")
+
+# Native transfer
+tx_hash = await manager.transfer("0x...", Decimal("10.5"))
+```
+
+**Code:** [`economy/chain.py:68-94`](economy/chain.py) - Network configurations
 
 ---
 

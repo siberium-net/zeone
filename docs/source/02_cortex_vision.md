@@ -11,9 +11,15 @@
 - Image pHash; duplicates if Hamming distance < 5.
 - Video signature = sequence of frame hashes; substring/overlap detection for fragments.
 - Duplicate short-circuit: if pHash matches known set, heavy vision pass is skipped.
+- **Merkle Tree:** P2P model distribution with chunk-level verification (O(log N) proof size). **[IMPLEMENTED]**
 
 ## Workflow
 1. Ingest scans files → dedup check (pHash).
 2. New assets: Florence caption/OD/OCR + brands; InsightFace embeddings; embeddings pushed to Chroma.
 3. Knowledge entries stored in ledger (knowledge_base) with phash/faces/brands/metadata.
 4. Compliance (PII + AI judge) sets SAFE/WARNING/BLOCKED before DHT/storage.
+
+## Distributed Inference
+- **Pipeline Parallelism:** HEAD → MIDDLE → TAIL nodes process LLM layers distributed. **[NEW]**
+- **NeuroLink:** Neural synapse agent for tensor transport between nodes via Binary Wire Protocol.
+- **Scaling:** 7B model (~14GB) → split 3 nodes → ~5GB per node. Consumer GPUs → Enterprise-scale inference.

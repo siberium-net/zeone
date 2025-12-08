@@ -542,8 +542,87 @@ def verify_download(path: Path, expected_hash: str) -> bool:
     return actual == expected_hash
 ```
 
-> [!WARNING]
-> Текущая реализация не использует Merkle Tree. Это означает, что невозможно верифицировать отдельные chunks до завершения загрузки всего файла. См. [GAPS.md](../GAPS.md) для предложения по улучшению.
+> [!NOTE]
+> **[IMPLEMENTED]** Merkle Tree реализован в [`core/security/merkle.py`](../../core/security/merkle.py).
+> Каждый chunk верифицируется немедленно при получении через Merkle proof.
+> 
+> См. раздел "4.4.1 Merkle Verification" ниже для деталей.
+
+### 4.4.1 Merkle Tree Verification [IMPLEMENTED]
+
+Каждый файл в манифесте содержит Merkle root:
+
+```json
+{
+  "name": "model.safetensors",
+  "size": 1500000000,
+  "sha256": "a1b2c3d4e5f6...",
+  "merkle_root": "abc123...",
+  "chunk_size": 1048576
+}
+```
+
+**Построение дерева:**
+
+```python
+from core.security.merkle import MerkleTree
+
+# Построить дерево из хэшей чанков
+chunk_hashes = [MerkleTree.hash_chunk(chunk) for chunk in chunks]
+tree = MerkleTree(chunk_hashes)
+
+# Получить root для включения в манифест
+merkle_root = tree.root_hex
+```
+
+**Получение proof при загрузке:**
+
+```python
+# Provider генерирует proof для запрошенного chunk
+proof = tree.get_proof(chunk_index)
+proof_hex = tree.get_proof_hex(chunk_index)  # Для JSON
+
+# Отправка вместе с chunk
+response = {
+    "chunk_data": chunk_bytes,
+    "chunk_index": chunk_index,
+    "merkle_proof": proof_hex,
+}
+```
+
+**Верификация при получении:**
+
+```python
+# Клиент верифицирует chunk немедленно
+is_valid = MerkleTree.verify_chunk(
+    chunk_data=received_chunk,
+    proof=proof,
+    root_hash=manifest["merkle_root"],
+    chunk_index=chunk_index,
+    total_chunks=total_chunks,
+)
+
+if not is_valid:
+    # [SECURITY] Corrupted chunk detected!
+    # 1. Reject chunk
+    # 2. Log incident
+    # 3. Slash peer's Trust Score
+    await trust.record_event(peer_id, TrustEvent.INVALID_MERKLE_PROOF)
+    raise SecurityError(f"Invalid Merkle proof for chunk {chunk_index}")
+
+# Chunk validated - safe to write
+write_chunk(target_path, chunk_index, received_chunk)
+```
+
+**Преимущества:**
+
+- ✅ Мгновенная верификация каждого chunk
+- ✅ Обнаружение corrupted data до записи на диск
+- ✅ Идентификация malicious peer (через chunk_index)
+- ✅ Защита от MITM-атак на chunk level
+- ✅ Эффективность: O(log N) размер proof
+
+**Код:** [`core/security/merkle.py`](../../core/security/merkle.py)
 
 ### 4.5 Resume Support
 
@@ -727,6 +806,130 @@ ChromaDB использует HNSW (Hierarchical Navigable Small World) инде
 
 ---
 
+## 7. Distributed Inference (Pipeline Parallelism) [NEW]
+
+### 7.1 Architecture
+
+ZEONE реализует Naive Pipeline Parallelism для распределённого LLM inference:
+
+```
+┌──────────┐    activations    ┌──────────┐    activations    ┌──────────┐
+│ HEAD     │ ──────────────►   │ MIDDLE   │ ──────────────►   │ TAIL     │
+│ Node     │                   │ Node(s)  │                   │ Node     │
+│          │                   │          │                   │          │
+│ Embed    │                   │ Layers   │                   │ Layers   │
+│ Layers   │                   │ [N:M]    │                   │ [M:End]  │
+│ [0:N]    │                   │          │                   │ LM Head  │
+└──────────┘                   └──────────┘                   └──────────┘
+```
+
+**Процесс:**
+
+1. **HEAD Node:** Tokenize → Embed → Layers[0:N] → Send activations
+2. **MIDDLE Node(s):** Receive → Layers[N:M] → Send activations
+3. **TAIL Node:** Receive → Layers[M:End] → LM Head → Detokenize → Result
+
+### 7.2 Components
+
+**PipelineWorker** ([`cortex/distributed/pipeline.py`](../../cortex/distributed/pipeline.py))
+- Загружает shard модели (subset of layers)
+- Обрабатывает forward pass для своих слоёв
+- Отправляет activations следующему узлу
+
+**NeuroLinkAgent** ([`agents/neuro_link.py`](../../agents/neuro_link.py))
+- Транспорт для передачи тензоров между узлами
+- Использует Binary Wire Protocol с типами TENSOR_DATA, TENSOR_CHUNK
+- Поддерживает chunked transfer для больших тензоров
+
+**PipelineCoordinator**
+- Управляет топологией pipeline (HEAD → MIDDLE → TAIL)
+- Обнаруживает peer nodes через DHT
+- Назначает слои на узлы
+
+### 7.3 Tensor Transport Protocol
+
+NeuroLink использует Binary Wire Protocol с специальными типами сообщений:
+
+| Message Type | Value | Description |
+|--------------|-------|-------------|
+| `TENSOR_DATA` | 0x70 (112) | Полный тензор в одном пакете |
+| `TENSOR_META` | 0x71 (113) | Метаданные тензора (shape, dtype) |
+| `TENSOR_CHUNK` | 0x72 (114) | Chunked transfer для больших тензоров |
+| `TENSOR_CHUNK_ACK` | 0x73 (115) | Подтверждение получения chunk |
+| `PIPELINE_FORWARD` | 0x74 (116) | Forward pass activation |
+| `PIPELINE_BACKWARD` | 0x75 (117) | Backward pass gradient (future) |
+
+**Пример использования:**
+
+```python
+from cortex.distributed.pipeline import PipelineWorker, PipelineConfig
+from agents.neuro_link import NeuroLinkAgent
+
+# HEAD node
+config = PipelineConfig(
+    model_path="models/llama-7b",
+    stage=PipelineStage.HEAD,
+    start_layer=0,
+    end_layer=10,
+    downstream_node="peer_middle_node_id",
+)
+
+neuro_link = NeuroLinkAgent(node, device="cuda:0")
+worker = PipelineWorker(config, neuro_link)
+
+await worker.start()
+
+# Process input
+output = await worker.process_input(input_ids)
+```
+
+```python
+# MIDDLE node - register callback
+async def on_activation(tensor, meta):
+    """Handle received activation from upstream."""
+    # Forward through our layers
+    output = model_shard(tensor)
+    
+    # Send to downstream
+    await neuro_link.send_activations(
+        next_peer_id,
+        output,
+        layer_idx=meta['layer_idx'] + num_our_layers,
+        batch_id=meta['batch_id']
+    )
+
+neuro_link.register_activation_handler(on_activation)
+```
+
+### 7.4 Performance Characteristics
+
+**Latency:**
+- Additional network round-trip per stage
+- Micro-batching для overlap compute/network
+- Async pipeline: следующий batch начинается пока текущий в transit
+
+**Throughput:**
+- Горизонтальное масштабирование для больших моделей
+- Consumer GPU nodes → Enterprise-scale inference
+- Load balancing через multiple MIDDLE nodes
+
+**Memory:**
+- Каждый node загружает только subset layers
+- 7B model: ~14GB → split на 3 nodes → ~5GB per node
+- Enables running large models on consumer hardware
+
+**Limitations:**
+- Naive pipeline (no bubble scheduling)
+- Inference only (backward pass = TODO)
+- Assumes homogeneous layer sizes
+
+**Код:**
+- [`cortex/distributed/pipeline.py`](../../cortex/distributed/pipeline.py) - PipelineWorker, Coordinator
+- [`agents/neuro_link.py`](../../agents/neuro_link.py) - NeuroLinkAgent, TensorTCPTransport
+- [`cortex/distributed/codec.py`](../../cortex/distributed/codec.py) - Tensor encoding/decoding
+
+---
+
 ## Ссылки
 
 1. Florence-2: Advancing a Unified Representation for a Variety of Vision Tasks (Microsoft, 2023)
@@ -734,4 +937,6 @@ ChromaDB использует HNSW (Hierarchical Navigable Small World) инде
 3. Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks
 4. ChromaDB Documentation: https://docs.trychroma.com/
 5. InsightFace: https://github.com/deepinsight/insightface
+6. GPipe: Easy Scaling with Micro-Batch Pipeline Parallelism (Google, 2019)
+7. PipeDream: Fast and Efficient Pipeline Parallel DNN Training (Microsoft, 2018)
 

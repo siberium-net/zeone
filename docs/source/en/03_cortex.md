@@ -542,8 +542,87 @@ def verify_download(path: Path, expected_hash: str) -> bool:
     return actual == expected_hash
 ```
 
-> [!WARNING]
-> Current implementation does not use Merkle Tree. This means individual chunks cannot be verified before completing full file download. See [GAPS.md](../GAPS.md) for improvement proposal.
+> [!NOTE]
+> **[IMPLEMENTED]** Merkle Tree is implemented in [`core/security/merkle.py`](../../core/security/merkle.py).
+> Each chunk is verified immediately upon receipt via Merkle proof.
+> 
+> See section "4.4.1 Merkle Verification" below for details.
+
+### 4.4.1 Merkle Tree Verification [IMPLEMENTED]
+
+Each file in the manifest contains a Merkle root:
+
+```json
+{
+  "name": "model.safetensors",
+  "size": 1500000000,
+  "sha256": "a1b2c3d4e5f6...",
+  "merkle_root": "abc123...",
+  "chunk_size": 1048576
+}
+```
+
+**Building the tree:**
+
+```python
+from core.security.merkle import MerkleTree
+
+# Build tree from chunk hashes
+chunk_hashes = [MerkleTree.hash_chunk(chunk) for chunk in chunks]
+tree = MerkleTree(chunk_hashes)
+
+# Get root for manifest
+merkle_root = tree.root_hex
+```
+
+**Getting proof during download:**
+
+```python
+# Provider generates proof for requested chunk
+proof = tree.get_proof(chunk_index)
+proof_hex = tree.get_proof_hex(chunk_index)  # For JSON
+
+# Send with chunk
+response = {
+    "chunk_data": chunk_bytes,
+    "chunk_index": chunk_index,
+    "merkle_proof": proof_hex,
+}
+```
+
+**Verification upon receipt:**
+
+```python
+# Client verifies chunk immediately
+is_valid = MerkleTree.verify_chunk(
+    chunk_data=received_chunk,
+    proof=proof,
+    root_hash=manifest["merkle_root"],
+    chunk_index=chunk_index,
+    total_chunks=total_chunks,
+)
+
+if not is_valid:
+    # [SECURITY] Corrupted chunk detected!
+    # 1. Reject chunk
+    # 2. Log incident
+    # 3. Slash peer's Trust Score
+    await trust.record_event(peer_id, TrustEvent.INVALID_MERKLE_PROOF)
+    raise SecurityError(f"Invalid Merkle proof for chunk {chunk_index}")
+
+# Chunk validated - safe to write
+write_chunk(target_path, chunk_index, received_chunk)
+```
+
+**Benefits:**
+
+- ✅ Instant verification of each chunk
+- ✅ Corrupted data detection before disk write
+- ✅ Malicious peer identification (via chunk_index)
+- ✅ Protection against MITM attacks at chunk level
+- ✅ Efficiency: O(log N) proof size
+
+**Code:** [`core/security/merkle.py`](../../core/security/merkle.py)
 
 ### 4.5 Resume Support
 
@@ -727,6 +806,130 @@ ChromaDB uses HNSW (Hierarchical Navigable Small World) index:
 
 ---
 
+## 7. Distributed Inference (Pipeline Parallelism) [NEW]
+
+### 7.1 Architecture
+
+ZEONE implements Naive Pipeline Parallelism for distributed LLM inference:
+
+```
+┌──────────┐    activations    ┌──────────┐    activations    ┌──────────┐
+│ HEAD     │ ──────────────►   │ MIDDLE   │ ──────────────►   │ TAIL     │
+│ Node     │                   │ Node(s)  │                   │ Node     │
+│          │                   │          │                   │          │
+│ Embed    │                   │ Layers   │                   │ Layers   │
+│ Layers   │                   │ [N:M]    │                   │ [M:End]  │
+│ [0:N]    │                   │          │                   │ LM Head  │
+└──────────┘                   └──────────┘                   └──────────┘
+```
+
+**Process:**
+
+1. **HEAD Node:** Tokenize → Embed → Layers[0:N] → Send activations
+2. **MIDDLE Node(s):** Receive → Layers[N:M] → Send activations
+3. **TAIL Node:** Receive → Layers[M:End] → LM Head → Detokenize → Result
+
+### 7.2 Components
+
+**PipelineWorker** ([`cortex/distributed/pipeline.py`](../../cortex/distributed/pipeline.py))
+- Loads model shard (subset of layers)
+- Processes forward pass for its layers
+- Sends activations to next node
+
+**NeuroLinkAgent** ([`agents/neuro_link.py`](../../agents/neuro_link.py))
+- Transport for tensor transmission between nodes
+- Uses Binary Wire Protocol with TENSOR_DATA, TENSOR_CHUNK types
+- Supports chunked transfer for large tensors
+
+**PipelineCoordinator**
+- Manages pipeline topology (HEAD → MIDDLE → TAIL)
+- Discovers peer nodes via DHT
+- Assigns layers to nodes
+
+### 7.3 Tensor Transport Protocol
+
+NeuroLink uses Binary Wire Protocol with special message types:
+
+| Message Type | Value | Description |
+|--------------|-------|-------------|
+| `TENSOR_DATA` | 0x70 (112) | Full tensor in single packet |
+| `TENSOR_META` | 0x71 (113) | Tensor metadata (shape, dtype) |
+| `TENSOR_CHUNK` | 0x72 (114) | Chunked transfer for large tensors |
+| `TENSOR_CHUNK_ACK` | 0x73 (115) | Chunk receipt acknowledgment |
+| `PIPELINE_FORWARD` | 0x74 (116) | Forward pass activation |
+| `PIPELINE_BACKWARD` | 0x75 (117) | Backward pass gradient (future) |
+
+**Example usage:**
+
+```python
+from cortex.distributed.pipeline import PipelineWorker, PipelineConfig
+from agents.neuro_link import NeuroLinkAgent
+
+# HEAD node
+config = PipelineConfig(
+    model_path="models/llama-7b",
+    stage=PipelineStage.HEAD,
+    start_layer=0,
+    end_layer=10,
+    downstream_node="peer_middle_node_id",
+)
+
+neuro_link = NeuroLinkAgent(node, device="cuda:0")
+worker = PipelineWorker(config, neuro_link)
+
+await worker.start()
+
+# Process input
+output = await worker.process_input(input_ids)
+```
+
+```python
+# MIDDLE node - register callback
+async def on_activation(tensor, meta):
+    """Handle received activation from upstream."""
+    # Forward through our layers
+    output = model_shard(tensor)
+    
+    # Send to downstream
+    await neuro_link.send_activations(
+        next_peer_id,
+        output,
+        layer_idx=meta['layer_idx'] + num_our_layers,
+        batch_id=meta['batch_id']
+    )
+
+neuro_link.register_activation_handler(on_activation)
+```
+
+### 7.4 Performance Characteristics
+
+**Latency:**
+- Additional network round-trip per stage
+- Micro-batching for compute/network overlap
+- Async pipeline: next batch starts while current in transit
+
+**Throughput:**
+- Horizontal scaling for large models
+- Consumer GPU nodes → Enterprise-scale inference
+- Load balancing via multiple MIDDLE nodes
+
+**Memory:**
+- Each node loads only subset of layers
+- 7B model: ~14GB → split across 3 nodes → ~5GB per node
+- Enables running large models on consumer hardware
+
+**Limitations:**
+- Naive pipeline (no bubble scheduling)
+- Inference only (backward pass = TODO)
+- Assumes homogeneous layer sizes
+
+**Code:**
+- [`cortex/distributed/pipeline.py`](../../cortex/distributed/pipeline.py) - PipelineWorker, Coordinator
+- [`agents/neuro_link.py`](../../agents/neuro_link.py) - NeuroLinkAgent, TensorTCPTransport
+- [`cortex/distributed/codec.py`](../../cortex/distributed/codec.py) - Tensor encoding/decoding
+
+---
+
 ## References
 
 1. Florence-2: Advancing a Unified Representation for a Variety of Vision Tasks (Microsoft, 2023)
@@ -734,4 +937,6 @@ ChromaDB uses HNSW (Hierarchical Navigable Small World) index:
 3. Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks
 4. ChromaDB Documentation: https://docs.trychroma.com/
 5. InsightFace: https://github.com/deepinsight/insightface
+6. GPipe: Easy Scaling with Micro-Batch Pipeline Parallelism (Google, 2019)
+7. PipeDream: Fast and Efficient Pipeline Parallel DNN Training (Microsoft, 2018)
 

@@ -122,9 +122,9 @@ $$
 
 **Период полураспада:** \( t_{1/2} = \frac{\ln 2}{\ln(1/0.99)} \approx 69 \) дней.
 
-### 2.3 [PROPOSED] EMA-формула
+### 2.3 EMA-формула [IMPLEMENTED]
 
-Для более плавного обновления предлагается Exponential Moving Average:
+Для более плавного обновления используется Exponential Moving Average:
 
 $$
 T_{new} = \alpha \cdot R + (1 - \alpha) \cdot T_{old}
@@ -138,6 +138,8 @@ $$
 - Естественное ограничение \( T \in [0, 1] \) без clamp
 - Экспоненциальное забывание старых событий
 - Параметр \( \alpha \) контролирует "память" системы
+
+**[OK]** Реализовано в [`economy/trust.py:206-253`](../../economy/trust.py) - `WeightedTrustScore.update_behavior_score()`
 
 ### 2.4 Начальное значение и Cold Start
 
@@ -157,9 +159,11 @@ $$
 
 ### 3.1 Токен ZEO
 
-- **Стандарт:** ERC-20 (совместимость с EVM-цепями)
+- **Стандарт:** Native SIBR token на Siberium blockchain
+- **Сеть:** Siberium (ChainID 111111 mainnet, 111000 testnet)
 - **Начальная эмиссия:** 100,000,000 ZEO
 - **Decimals:** 18
+- **Gas Token:** SIBR (native, как ETH на Ethereum)
 
 ### 3.2 Кривая эмиссии
 
@@ -235,9 +239,13 @@ $$
    - Требуется время для накопления репутации
    - Sybil-узлы не могут мгновенно получить влияние
 
-3. **[PROPOSED] Stake requirement:**
+3. **Stake requirement [IMPLEMENTED]:**
    - Для участия в DHT routing: минимальный stake 10 ZEO
    - Для предоставления услуг: stake пропорционален bandwidth
+   
+**[OK]** Реализовано через `WeightedTrustScore` в [`economy/trust.py`](../../economy/trust.py).
+
+Формула: `T_effective = T_behavior * log10(1 + Stake / BaseStake)`
 
 **Эффективность:**
 При stake requirement = 10 ZEO и цене 1 ZEO = $0.10:

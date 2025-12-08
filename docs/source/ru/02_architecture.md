@@ -11,9 +11,11 @@
 
 ## 1. Wire Protocol
 
-### 1.1 Текущая реализация (Legacy)
+### 1.1 Legacy JSON Protocol [DEPRECATED]
 
-Текущий `SimpleTransport` использует простой формат:
+**[WARNING]** Этот протокол УСТАРЕЛ с версии 2.0. Используйте Binary Wire Protocol (раздел 1.2).
+
+Legacy `SimpleTransport` использовал простой формат:
 
 ```
 ┌─────────────────┬──────────────────────────────────┐
@@ -39,9 +41,11 @@
 - Нет версионирования протокола
 - Отсутствует magic number для идентификации потока
 
-### 1.2 [PROPOSED] Binary Wire Protocol v1
+### 1.2 Binary Wire Protocol v1 [CURRENT]
 
-Предлагается бинарный формат для production:
+**[IMPLEMENTED]** Полностью реализован в [`core/wire.py`](../../core/wire.py).
+
+Бинарный формат для production с жёсткими требованиями безопасности:
 
 ```
  0                   1                   2                   3
@@ -101,6 +105,18 @@
 | 0x50 | IOU | Bidirectional |
 | 0x51 | BALANCE_CLAIM | Request |
 | 0x52 | BALANCE_ACK | Response |
+
+### 1.2.1 Hard Fork Notice
+
+**[BREAKING CHANGE]** Binary Wire Protocol реализует Hard Fork:
+
+- **Magic Bytes Check:** Любые данные без Magic `b'ZE'` (0x5A45) → немедленное закрытие сокета
+- **No Backward Compatibility:** Нет обратной совместимости с JSON протоколом
+- **Version Validation:** Несовместимые версии протокола отклоняются мгновенно
+
+Это предотвращает атаки через подделку трафика и обеспечивает чистоту протокола на уровне транспорта.
+
+**Код:** [`core/wire.py:585-645`](../../core/wire.py) - `handle_incoming_connection()` с проверкой Magic
 
 ### 1.3 Handshake Protocol
 

@@ -122,9 +122,9 @@ where \( d \) is the number of inactive days.
 
 **Half-life:** \( t_{1/2} = \frac{\ln 2}{\ln(1/0.99)} \approx 69 \) days.
 
-### 2.3 [PROPOSED] EMA Formula
+### 2.3 EMA Formula [IMPLEMENTED]
 
-For smoother updates, Exponential Moving Average is proposed:
+For smoother updates, Exponential Moving Average is used:
 
 $$
 T_{new} = \alpha \cdot R + (1 - \alpha) \cdot T_{old}
@@ -138,6 +138,8 @@ where:
 - Natural bound \( T \in [0, 1] \) without clamp
 - Exponential forgetting of old events
 - Parameter \( \alpha \) controls system "memory"
+
+**[OK]** Implemented in [`economy/trust.py:206-253`](../../economy/trust.py) - `WeightedTrustScore.update_behavior_score()`
 
 ### 2.4 Initial Value and Cold Start
 
@@ -157,9 +159,11 @@ A peer with \( T < T_{min} \) can only:
 
 ### 3.1 ZEO Token
 
-- **Standard:** ERC-20 (EVM chain compatible)
+- **Standard:** Native SIBR token on Siberium blockchain
+- **Network:** Siberium (ChainID 111111 mainnet, 111000 testnet)
 - **Initial Supply:** 100,000,000 ZEO
 - **Decimals:** 18
+- **Gas Token:** SIBR (native, like ETH on Ethereum)
 
 ### 3.2 Emission Curve
 
@@ -235,9 +239,13 @@ where \( k_{stake} = 100 \) ZEO/Mbps.
    - Time required to accumulate reputation
    - Sybil nodes cannot instantly gain influence
 
-3. **[PROPOSED] Stake requirement:**
+3. **Stake requirement [IMPLEMENTED]:**
    - For DHT routing participation: minimum stake 10 ZEO
    - For service provision: stake proportional to bandwidth
+   
+**[OK]** Implemented via `WeightedTrustScore` in [`economy/trust.py`](../../economy/trust.py).
+
+Formula: `T_effective = T_behavior * log10(1 + Stake / BaseStake)`
 
 **Effectiveness:**
 With stake requirement = 10 ZEO and price 1 ZEO = $0.10:

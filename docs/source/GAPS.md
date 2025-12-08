@@ -458,12 +458,148 @@ Implement S/Kademlia:
 
 ## Priority Matrix
 
-| Priority | Count | Items |
-|----------|-------|-------|
-| Critical | 1 | Merkle Tree verification |
-| High | 6 | JSON overhead, Stake weight, Emission, Settlement contract, Distributed inference, NAT |
-| Medium | 8 | Version negotiation, Formal verification, Replay window, DAO, Model verification, Embeddings, Monitoring |
-| Low | 5 | Magic bytes, Credit dynamics, Streaming, S/Kademlia, Config management |
+**[UPDATED]** После Epoch 1 & 3 многие пункты реализованы и перемещены в архив (см. раздел "Implemented Features Archive" ниже).
+
+| Priority | Count | Items | Status |
+|----------|-------|-------|--------|
+| ~~Critical~~ | ~~1~~ | ~~Merkle Tree verification~~ | [OK] IMPLEMENTED |
+| High | 2 | Emission, NAT | Pending |
+| ~~High~~ | ~~4~~ | ~~JSON overhead, Stake weight, Settlement contract, Distributed inference~~ | [OK] IMPLEMENTED |
+| Medium | 8 | Version negotiation, Formal verification, Replay window, DAO, Model verification, Embeddings, Monitoring | Pending |
+| Low | 4 | Credit dynamics, Streaming, S/Kademlia, Config management | Pending |
+| ~~Low~~ | ~~1~~ | ~~Magic bytes~~ | [OK] IMPLEMENTED |
+
+**Итого:**
+- [OK] Implemented: 6 items (Critical: 1, High: 4, Low: 1)
+- Pending: 14 items (High: 2, Medium: 8, Low: 4)
+
+---
+
+## Implemented Features Archive
+
+Этот раздел содержит функции, которые ранее были в GAPS, но теперь реализованы и перемещены в основную документацию.
+
+### [OK] 1.1 Binary Wire Protocol (JSON Overhead)
+
+**Статус:** IMPLEMENTED  
+**Код:** [`core/wire.py`](../../core/wire.py)  
+**Документация:** [`docs/source/ru/02_architecture.md`](ru/02_architecture.md) раздел 1.2
+
+Binary Wire Protocol v1 полностью реализован:
+- Magic bytes `b'ZE'` (0x5A45)
+- Fixed 98-byte header
+- XSalsa20-Poly1305 encryption
+- Ed25519 signatures
+- Hard Fork: нет обратной совместимости с JSON
+
+**Улучшения:**
+- ~40% reduction в размере сообщений
+- Version negotiation через header
+- Immediate invalid protocol detection
+
+---
+
+### [OK] 1.3 Magic Bytes Detection
+
+**Статус:** IMPLEMENTED  
+**Код:** [`core/wire.py:53`](../../core/wire.py) - `MAGIC = b'ZE'`
+
+Magic bytes 0x5A45 реализованы в Binary Wire Protocol. Любые данные без Magic → немедленное закрытие сокета.
+
+---
+
+### [OK] 2.1 Merkle Tree for Chunk Verification
+
+**Статус:** IMPLEMENTED  
+**Код:** [`core/security/merkle.py`](../../core/security/merkle.py)  
+**Документация:** [`docs/source/ru/03_cortex.md`](ru/03_cortex.md) раздел 4.4.1
+
+Полная реализация Merkle Tree для chunk-level verification:
+- Build tree from chunk hashes
+- Generate inclusion proofs
+- Verify individual chunks без полной загрузки файла
+- O(log N) proof size
+- Integration с Trust Score (slashing на invalid proof)
+
+**Защита:**
+- Instant corrupted chunk detection
+- Malicious peer identification
+- MITM attack prevention на chunk level
+
+---
+
+### [OK] 2.2 Weighted Trust Score (Stake Weight)
+
+**Статус:** IMPLEMENTED  
+**Код:** [`economy/trust.py:176-204`](../../economy/trust.py)  
+**Документация:** [`docs/source/ru/01_whitepaper.md`](ru/01_whitepaper.md) раздел 4.1
+
+Weighted Trust Score реализован:
+
+```python
+T_effective = T_behavior * log10(1 + Stake / BaseStake)
+```
+
+**Компоненты:**
+- `WeightedTrustScore` класс
+- EMA для behavior score
+- Stake weighting через log10
+- Dust limit protection (< 10 ZEO)
+- Slashing механизм для критических нарушений
+
+**Защита от Sybil:**
+- Economic barrier через stake requirement
+- Квадратный корень для предотвращения плутократии
+- Blacklist для slashed peers
+
+---
+
+### [OK] 3.2 Settlement Smart Contract (Native SIBR)
+
+**Статус:** IMPLEMENTED на Siberium  
+**Код:** [`economy/chain.py`](../../economy/chain.py) - `SiberiumManager`  
+**Документация:** [`docs/source/ru/04_economy.md`](ru/04_economy.md) раздел 6
+
+**ВАЖНО:** Реализовано как Native SIBR token (не ERC-20!):
+
+- `ZEOSettlement.sol` контракт
+- Native staking через payable deposit()
+- Claim mechanism с EIP-712 signatures
+- 7-day unstaking timelock
+- Fee accumulation and distribution
+
+**Сети:**
+- Mainnet: ChainID 111111, https://rpc.siberium.net
+- Testnet: ChainID 111000, https://rpc.test.siberium.net
+
+---
+
+### [OK] 4.1 Distributed Inference (Pipeline Parallelism)
+
+**Статус:** IMPLEMENTED  
+**Код:**
+- [`cortex/distributed/pipeline.py`](../../cortex/distributed/pipeline.py) - PipelineWorker, Coordinator
+- [`agents/neuro_link.py`](../../agents/neuro_link.py) - NeuroLinkAgent
+
+**Документация:** [`docs/source/ru/03_cortex.md`](ru/03_cortex.md) раздел 7
+
+Naive Pipeline Parallelism реализован:
+
+```
+HEAD Node → MIDDLE Node(s) → TAIL Node
+```
+
+**Компоненты:**
+- Model sharding по layers
+- Tensor transport через NeuroLink
+- Binary Wire Protocol для TENSOR_DATA messages
+- Chunked transfer для больших tensors
+- Async pipeline с micro-batching
+
+**Преимущества:**
+- Horizontal scaling для LLM inference
+- Consumer GPU → Enterprise-scale
+- 7B model: 14GB → split 3 nodes → ~5GB each
 
 ---
 
