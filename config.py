@@ -5,9 +5,47 @@ P2P Network Configuration
 """
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import os
+
+# ============================================================================
+# Blockchain Network Presets
+# ============================================================================
+
+NETWORKS: Dict[str, Dict[str, object]] = {
+    "mainnet": {
+        "name": "Siberium Mainnet",
+        "chain_id": 111111,
+        "rpc_url": "https://rpc.siberium.net",
+        "explorer_url": "https://explorer.siberium.net",
+        "symbol": "SIBR",
+        # NOTE: Fill in when deployed to mainnet
+        "contract_address": "0x0000000000000000000000000000000000000000",
+    },
+    "testnet": {
+        "name": "Siberium Testnet",
+        "chain_id": 111000,
+        "rpc_url": "https://rpc.test.siberium.net",
+        "explorer_url": "https://explorer.test.siberium.net",
+        "symbol": "tSIBR",
+        "contract_address": "0x503319D9f880D7D0F0166B2A3C08d4048cFEDCf0",
+    },
+}
+
+# Selected network from environment (.env: ZEONE_NETWORK)
+ZEONE_NETWORK: str = os.getenv("ZEONE_NETWORK", "testnet").lower()
+if ZEONE_NETWORK not in NETWORKS:
+    ZEONE_NETWORK = "testnet"
+
+_SELECTED = NETWORKS[ZEONE_NETWORK]
+
+# Convenience globals
+RPC_URL: str = _SELECTED["rpc_url"]  # type: ignore
+CHAIN_ID: int = int(_SELECTED["chain_id"])  # type: ignore
+EXPLORER_URL: str = _SELECTED["explorer_url"]  # type: ignore
+TOKEN_SYMBOL: str = _SELECTED["symbol"]  # type: ignore
+CONTRACT_ADDRESS: str = _SELECTED["contract_address"]  # type: ignore
 
 
 @dataclass
@@ -16,6 +54,13 @@ class NetworkConfig:
     
     # Порт по умолчанию для TCP сервера
     default_port: int = 8468
+
+    # Blockchain network parameters (populated from NETWORKS preset)
+    chain_id: int = CHAIN_ID
+    rpc_url: str = RPC_URL
+    explorer_url: str = EXPLORER_URL
+    token_symbol: str = TOKEN_SYMBOL
+    contract_address: str = CONTRACT_ADDRESS
     
     # Bootstrap узлы для первоначального подключения к сети
     # [DECENTRALIZATION] Это единственная "централизованная" точка входа.
@@ -164,6 +209,20 @@ class Config:
 
 # Глобальный экземпляр конфигурации
 config = Config()
+
+
+def get_current_network() -> Dict[str, object]:
+    """Вернуть активный пресет сети."""
+    return {
+        "key": ZEONE_NETWORK,
+        "name": _SELECTED["name"],
+        "chain_id": CHAIN_ID,
+        "rpc_url": RPC_URL,
+        "explorer_url": EXPLORER_URL,
+        "symbol": TOKEN_SYMBOL,
+        "contract_address": CONTRACT_ADDRESS,
+    }
+
 
 # Compliance toggle (disabled by default)
 COMPLIANCE_ENABLED = os.getenv("COMPLIANCE_ENABLED", "False").lower() == "true"

@@ -75,7 +75,7 @@ try:
 except ImportError:
     pass  # python-dotenv не установлен
 
-from config import config
+from config import config, get_current_network, ZEONE_NETWORK
 from core.node import Node
 from core.transport import Crypto, Message, MessageType
 from economy.ledger import Ledger, DEFAULT_DEBT_LIMIT_BYTES
@@ -141,6 +141,13 @@ ui_handler = UIStreamHandler(ui_log_buffer)
 ui_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(ui_handler)
 
+# Log active blockchain network
+_net = get_current_network()
+logger.info(
+    "[INFO] Starting in NETWORK: %s (%s)",
+    _net["name"],
+    _net["chain_id"],
+)
 
 def format_bytes(num_bytes: float) -> str:
     """Форматировать байты в читаемый вид."""
