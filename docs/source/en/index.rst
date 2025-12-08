@@ -11,10 +11,10 @@ Technical specification for the ZEONE decentralized P2P network.
    02_architecture
    03_cortex
    04_economy
+   05_future
 
 .. toctree::
    :maxdepth: 1
    :caption: Appendix
 
    ../GAPS
-   ../GAPS_2.0

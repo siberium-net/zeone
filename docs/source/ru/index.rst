@@ -11,10 +11,10 @@
    02_architecture
    03_cortex
    04_economy
+   05_future
 
 .. toctree::
    :maxdepth: 1
    :caption: Приложения
 
    ../GAPS
-   ../GAPS_2.0
