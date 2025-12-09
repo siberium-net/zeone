@@ -27,6 +27,7 @@ from webui.tabs.library import LibraryTab
 from webui.tabs.ingest import IngestTab
 from webui.tabs.activity import ActivityTab
 from webui.components.gallery import Gallery
+from config import NETWORKS, get_current_network
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,9 @@ class P2PWebUI:
         self._log_buffer = deque(maxlen=500)
         self._log_handler: Optional[logging.Handler] = None
         self._dream_mode_enabled = False
-        self._version_text = "unknown"
+        # Show active network in header as version text substitute
+        _net = get_current_network()
+        self._version_text = f"{_net['name']} (Chain { _net['chain_id'] })"
         self.downloader = DownloadManager()
         self.library_tab = LibraryTab(Path("ledger.db"), self)
         self.gallery = Gallery()
@@ -1308,6 +1311,24 @@ class P2PWebUI:
                     ui.separator()
                     
                     ui.label('Network').classes('font-bold mt-4')
+                    current_network = get_current_network()
+                    # NiceGUI expects dict: {value: label}
+                    network_options = {k: v["name"] for k, v in NETWORKS.items()}
+                    default_value = current_network["key"] if current_network["key"] in network_options else next(iter(network_options.keys()))
+                    ui.select(
+                        options=network_options,
+                        value=default_value,
+                        label='Blockchain Network',
+                        with_input=False,
+                    ).props('outlined')
+                    ui.label(
+                        f"Active: {current_network['name']} (Chain ID: {current_network['chain_id']})"
+                    ).classes('text-sm text-gray-500')
+                    ui.input(
+                        'RPC URL (current)',
+                        value=current_network["rpc_url"]
+                    ).props('readonly').classes('w-full')
+                    
                     ui.number('Max Peers', value=50)
                     ui.number('Debt Limit (bytes)', value=100_000_000)
                     

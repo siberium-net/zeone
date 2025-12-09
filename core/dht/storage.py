@@ -312,7 +312,13 @@ class DHTStorage:
                 (key,)
             )
             await self._db.commit()
-            return cursor.rowcount > 0
+            # aiosqlite AsyncCursor may not expose rowcount; use SQLite changes()
+            if hasattr(cursor, "rowcount") and cursor.rowcount != -1:
+                return cursor.rowcount > 0
+            changes_cursor = await self._db.execute("SELECT changes() AS cnt")
+            row = await changes_cursor.fetchone()
+            changed = row["cnt"] if isinstance(row, dict) else row[0]
+            return changed > 0
     
     async def has_key(self, key: bytes) -> bool:
         """Проверить наличие ключа."""
@@ -415,7 +421,14 @@ class DHTStorage:
             )
             await self._db.commit()
             
-            deleted = cursor.rowcount
+            deleted = 0
+            if hasattr(cursor, "rowcount") and cursor.rowcount != -1:
+                deleted = cursor.rowcount
+            else:
+                changes_cursor = await self._db.execute("SELECT changes() AS cnt")
+                row = await changes_cursor.fetchone()
+                deleted = row["cnt"] if isinstance(row, dict) else row[0]
+            
             if deleted > 0:
                 logger.info(f"[DHT_STORAGE] Cleanup: removed {deleted} expired entries")
             
