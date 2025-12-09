@@ -17,6 +17,7 @@ Cortex Service - Главный сервис интеграции
 
 import asyncio
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -31,6 +32,7 @@ from .roles import Scout, Analyst, Librarian, Task, RoleResult
 from .library import SemanticLibrary, Report, Bounty
 from .consilium import Consilium, CouncilResult, CouncilStatus
 from .automata import Automata, Investigation, InvestigationStatus
+from .evolution.engine import EvolutionEngine, run_background
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,8 @@ class CortexService:
         
         # State
         self._running = False
+        self._evo_task: Optional[asyncio.Task] = None
+        self.evolution_engine: Optional[EvolutionEngine] = None
         
         logger.info("[CORTEX] Service initialized")
     
@@ -177,6 +181,15 @@ class CortexService:
         if self.config.enable_automata:
             await self.automata.start()
             logger.info("[CORTEX] Automata started")
+
+        # Evolution engine background loop
+        try:
+            self.evolution_engine = EvolutionEngine()
+            self.evolution_engine.initialize_population()
+            self._evo_task = asyncio.create_task(run_background(self.evolution_engine, interval=5.0))
+            logger.info("[CORTEX] Evolution engine started")
+        except Exception as e:
+            logger.warning(f"[CORTEX] Evolution engine failed to start: {e}")
         
         logger.info("[CORTEX] Service started")
     
@@ -186,6 +199,11 @@ class CortexService:
         
         if self.automata.is_running:
             await self.automata.stop()
+
+        if self._evo_task:
+            self._evo_task.cancel()
+            with suppress(Exception):
+                await self._evo_task
         
         logger.info("[CORTEX] Service stopped")
     
@@ -517,4 +535,3 @@ def create_cortex_service(
         dht_storage=dht_storage,
         config=config,
     )
-
