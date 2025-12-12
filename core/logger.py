@@ -35,11 +35,18 @@ class UIStreamHandler(logging.Handler):
             self.buffer.append(html)
             # broadcast
             payload = {"message": html, "level": record.levelname}
-            # fire-and-forget
             try:
                 import asyncio
-                asyncio.create_task(event_bus.broadcast("activity_log", payload))
+
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop is not None:
+                    loop.create_task(event_bus.broadcast("activity_log", payload))
             except Exception:
+                # If no loop is running, skip broadcasting to avoid unawaited coroutine warnings.
                 pass
         except Exception:
             self.handleError(record)

@@ -26,6 +26,7 @@ from webui.components.downloader import DownloadManager
 from webui.tabs.library import LibraryTab
 from webui.tabs.ingest import IngestTab
 from webui.tabs.activity import ActivityTab
+from webui.tabs.evolution import EvolutionTab
 from webui.components.gallery import Gallery
 from config import NETWORKS, get_current_network
 
@@ -139,6 +140,7 @@ class P2PWebUI:
         self.gallery = Gallery()
         self.ingest_tab = IngestTab(self.gallery)
         self.activity_tab = ActivityTab(ui_log_buffer if 'ui_log_buffer' in globals() else deque(maxlen=1000))
+        self.evolution_tab = EvolutionTab(self)
         self.vpn_pathfinder = None
         self._vpn_status_label = None
         self._vpn_enabled = False
@@ -248,6 +250,7 @@ class P2PWebUI:
                 ui.button('Storage', icon='folder', on_click=lambda: ui.navigate.to('/storage')).classes('w-full justify-start')
                 ui.button('Compute', icon='memory', on_click=lambda: ui.navigate.to('/compute')).classes('w-full justify-start')
                 ui.button('Ingest', icon='cloud_upload', on_click=lambda: ui.navigate.to('/ingest')).classes('w-full justify-start')
+                ui.button('Evolution', icon='science', on_click=lambda: ui.navigate.to('/evolution')).classes('w-full justify-start')
                 
                 ui.separator()
                 
@@ -2157,6 +2160,7 @@ class P2PWebUI:
         self.library_tab.create_page()
         self.ingest_tab.create_page(self)
         self.activity_tab.create_page(self)
+        self.evolution_tab.create_page(self)
         self._setup_websocket_endpoint()
     
     def run_sync(self, host: str = "0.0.0.0", port: int = 8080) -> None:

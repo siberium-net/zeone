@@ -63,13 +63,17 @@ class SimpleAPI:
         - Sensors are methods starting with 'get_'.
         - Actions are any other callable names from spec.
         """
-        if name.startswith("get_") or name in self._sensors:
+        # Safe access via __dict__ to avoid recursion if attributes are missing.
+        sensors = self.__dict__.get("_sensors", set())
+        actions = self.__dict__.get("_actions", set())
+
+        if name.startswith("get_") or name in sensors:
             def _sensor(*_args, **_kwargs):
                 return random.uniform(0.0, 100.0)
 
             return _sensor
 
-        if name in self._actions:
+        if name in actions:
             def _action(*args, **_kwargs):
                 amount = args[0] if args else 1.0
                 try:
