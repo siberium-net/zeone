@@ -4,33 +4,102 @@ Genetic operators and compilation for GGGP agents.
 
 import copy
 import random
-from typing import Any, List
+from typing import Any, List, Optional
 
-from cortex.evolution.grammar import ActionNode, ConditionNode, Gene
+from cortex.evolution.grammar import (
+    ActionNode,
+    ActionTerminal,
+    ComparisonNode,
+    ConditionNode,
+    ConstNode,
+    Gene,
+    GrammarContext,
+    GRAMMAR_CONTEXT,
+    IfNode,
+    IndicatorNode,
+    LogicNode,
+    SensorTerminal,
+)
 
 
-def random_action() -> ActionNode:
-    action = random.choice(["buy", "sell", "hold"])
-    amount = round(random.uniform(0.1, 10.0), 2)
-    return ActionNode(action=action, amount=amount)
+def random_action(context: Optional[GrammarContext] = None) -> Any:
+    """Random action terminal (dynamic)."""
+    ctx = context or GRAMMAR_CONTEXT
+    name = random.choice(ctx.allowed_actions) if ctx.allowed_actions else "hold"
+
+    # Legacy buy/sell amount support if action is buy/sell.
+    if name in ("buy", "sell"):
+        amount = round(random.uniform(0.1, 10.0), 2)
+        return ActionNode(action=name, amount=amount)
+
+    return ActionTerminal(name=name)
 
 
-def random_condition(depth: int = 0) -> ConditionNode:
+def random_sensor(context: Optional[GrammarContext] = None) -> SensorTerminal:
+    ctx = context or GRAMMAR_CONTEXT
+    name = random.choice(ctx.allowed_sensors) if ctx.allowed_sensors else "get_balance"
+    return SensorTerminal(name=name)
+
+
+def random_value(depth: int, context: Optional[GrammarContext]) -> Any:
+    """Random numeric expression."""
+    if depth <= 0 or random.random() < 0.3:
+        if random.random() < 0.6:
+            return random_sensor(context)
+        return ConstNode(value=round(random.uniform(0.0, 100.0), 3))
+
+    # Occasionally emit indicator node.
+    if random.random() < 0.3:
+        ind_name = random.choice(["rsi", "sma"])
+        period = random.choice([7, 14, 21, 50])
+        return IndicatorNode(name=ind_name, period=period, source=random_sensor(context))
+
+    return random_sensor(context)
+
+
+def random_comparison(depth: int, context: Optional[GrammarContext]) -> ComparisonNode:
     comparator = random.choice(["<", "<=", ">", ">=", "=="])
-    threshold = round(random.uniform(0.0, 100.0), 2)
-    # Shallow random children
-    on_true = random_action()
-    on_false = random_action() if depth > 0 else None
-    return ConditionNode(comparator=comparator, threshold=threshold, on_true=on_true, on_false=on_false)
+    left = random_value(depth - 1, context)
+    right = random_value(0, context)
+    return ComparisonNode(left=left, comparator=comparator, right=right)
 
 
-def random_gene(rule_count: int = 3) -> Gene:
+def random_logic(depth: int, context: Optional[GrammarContext]) -> Any:
+    if depth <= 0 or random.random() < 0.5:
+        return random_comparison(depth, context)
+    op = random.choice(["AND", "OR"])
+    operands = [random_comparison(depth - 1, context), random_comparison(depth - 1, context)]
+    return LogicNode(operator=op, operands=operands)
+
+
+def random_condition(depth: int = 2, context: Optional[GrammarContext] = None) -> Any:
+    """Random condition tree."""
+    ctx = context or GRAMMAR_CONTEXT
+    return random_logic(depth, ctx)
+
+
+def random_gene(depth: int = 2, context: Optional[GrammarContext] = None) -> Gene:
+    """
+    Random genome generation using dynamic context.
+
+    Args:
+        depth: maximum depth of conditional trees.
+        context: GrammarContext with allowed terminals.
+    """
+    ctx = context or GRAMMAR_CONTEXT
+    min_rules, max_rules = ctx.rule_count
+    rule_count = random.randint(min_rules, max_rules)
     rules: List[Any] = []
+
     for _ in range(rule_count):
-        if random.random() < 0.5:
-            rules.append(random_action())
+        if depth > 0 and random.random() < 0.6:
+            cond = random_condition(depth, ctx)
+            on_true = random_action(ctx)
+            on_false = random_action(ctx) if random.random() < 0.8 else None
+            rules.append(IfNode(condition=cond, on_true=on_true, on_false=on_false))
         else:
-            rules.append(random_condition())
+            rules.append(random_action(ctx))
+
     return Gene(rules=rules)
 
 
@@ -44,17 +113,77 @@ def compile_genome(gene_root: Gene) -> str:
     Safe DSL: uses only local variables, no imports.
     """
 
+    def compile_expr(node: Any) -> str:
+        if isinstance(node, ConstNode):
+            return repr(float(node.value))
+
+        if isinstance(node, SensorTerminal):
+            n = node.name.strip()
+            if n.startswith("get_"):
+                return f"api.{n}()"
+            return f"api.get_{n}()"
+
+        if isinstance(node, IndicatorNode):
+            n = node.name.strip()
+            if n.startswith("get_"):
+                fn = n
+            else:
+                fn = f"get_{n}"
+            args: List[str] = []
+            if node.source is not None:
+                args.append(compile_expr(node.source))
+            if node.period:
+                args.append(str(int(node.period)))
+            return f"api.{fn}({', '.join(args)})" if args else f"api.{fn}()"
+
+        if isinstance(node, ComparisonNode):
+            return f"({compile_expr(node.left)} {node.comparator} {compile_expr(node.right)})"
+
+        if isinstance(node, LogicNode):
+            op = "and" if node.operator.upper() == "AND" else "or"
+            inner = f" {op} ".join(compile_expr(o) for o in node.operands)
+            return f"({inner})" if inner else "False"
+
+        # Legacy ConditionNode
+        if isinstance(node, ConditionNode):
+            return f"(balance {node.comparator} {node.threshold})"
+
+        return "False"
+
     def compile_node(node: Any, indent: int = 0) -> List[str]:
         pad = " " * indent
         lines: List[str] = []
-        if isinstance(node, ActionNode):
-            if node.action == "buy":
-                lines.append(f"{pad}fitness -= {node.amount}")
-            elif node.action == "sell":
-                lines.append(f"{pad}fitness += {node.amount}")
+        if isinstance(node, ActionTerminal):
+            name = node.name.strip()
+            if node.amount is not None:
+                lines.append(f"{pad}api.{name}({float(node.amount)})")
             else:
-                lines.append(f"{pad}fitness += 0  # hold")
+                lines.append(f"{pad}api.{name}()")
+            lines.append(f"{pad}agent_output['actions'].append('{name}')")
+        elif isinstance(node, ActionNode):
+            # Legacy actions still affect balance.
+            if node.action == "buy":
+                lines.append(f"{pad}api.buy({node.amount})")
+                lines.append(f"{pad}agent_output['actions'].append('buy')")
+            elif node.action == "sell":
+                lines.append(f"{pad}api.sell({node.amount})")
+                lines.append(f"{pad}agent_output['actions'].append('sell')")
+            else:
+                lines.append(f"{pad}api.hold()")
+                lines.append(f"{pad}agent_output['actions'].append('hold')")
+        elif isinstance(node, IfNode):
+            lines.append(f"{pad}if {compile_expr(node.condition)}:")
+            if node.on_true:
+                lines.extend(compile_node(node.on_true, indent + 4))
+            else:
+                lines.append(f"{pad}    pass")
+            lines.append(f"{pad}else:")
+            if node.on_false:
+                lines.extend(compile_node(node.on_false, indent + 4))
+            else:
+                lines.append(f"{pad}    pass")
         elif isinstance(node, ConditionNode):
+            # Legacy conditional
             lines.append(f"{pad}if balance {node.comparator} {node.threshold}:")
             if node.on_true:
                 lines.extend(compile_node(node.on_true, indent + 4))
@@ -74,11 +203,13 @@ def compile_genome(gene_root: Gene) -> str:
 
     body_lines = compile_node(gene_root, indent=0)
     code_lines = [
-        "fitness = api.get_balance()",
-        "balance = fitness",
+        "history = []",
+        "agent_output = {'actions': []}",
+        "balance = api.get_balance()",
     ]
     code_lines.extend(body_lines)
-    code_lines.append("api.log(f'fitness={fitness}')")
+    code_lines.append("agent_output['final_balance'] = api.get_balance()")
+    code_lines.append("history.append({'balance': agent_output['final_balance']})")
     code_lines.append(" ")
     return "\n".join(code_lines)
 
@@ -93,13 +224,26 @@ def _collect_nodes(node: Any) -> List[Any]:
         nodes.append(node)
         for r in node.rules:
             nodes.extend(_collect_nodes(r))
-    elif isinstance(node, ConditionNode):
+    elif isinstance(node, IfNode):
         nodes.append(node)
+        nodes.extend(_collect_nodes(node.condition))
         if node.on_true:
             nodes.extend(_collect_nodes(node.on_true))
         if node.on_false:
             nodes.extend(_collect_nodes(node.on_false))
-    elif isinstance(node, ActionNode):
+    elif isinstance(node, LogicNode):
+        nodes.append(node)
+        for o in node.operands:
+            nodes.extend(_collect_nodes(o))
+    elif isinstance(node, ComparisonNode):
+        nodes.append(node)
+        nodes.extend(_collect_nodes(node.left))
+        nodes.extend(_collect_nodes(node.right))
+    elif isinstance(node, IndicatorNode):
+        nodes.append(node)
+        if node.source:
+            nodes.extend(_collect_nodes(node.source))
+    elif isinstance(node, (SensorTerminal, ActionTerminal, ConstNode, ActionNode, ConditionNode)):
         nodes.append(node)
     return nodes
 
@@ -125,6 +269,29 @@ def crossover(parent_a: Gene, parent_b: Gene) -> Gene:
             return replacement
         if isinstance(root, Gene):
             root.rules = [replace(r, target, replacement) for r in root.rules]
+        elif isinstance(root, IfNode):
+            if root.condition is target:
+                root.condition = replacement
+            else:
+                root.condition = replace(root.condition, target, replacement)
+            if root.on_true is target:
+                root.on_true = replacement
+            else:
+                root.on_true = replace(root.on_true, target, replacement) if root.on_true else None
+            if root.on_false is target:
+                root.on_false = replacement
+            else:
+                root.on_false = replace(root.on_false, target, replacement) if root.on_false else None
+        elif isinstance(root, LogicNode):
+            root.operands = [replace(o, target, replacement) for o in root.operands]
+        elif isinstance(root, ComparisonNode):
+            root.left = replace(root.left, target, replacement)
+            root.right = replace(root.right, target, replacement)
+        elif isinstance(root, IndicatorNode):
+            if root.source is target:
+                root.source = replacement
+            else:
+                root.source = replace(root.source, target, replacement) if root.source else None
         elif isinstance(root, ConditionNode):
             if root.on_true is target:
                 root.on_true = replacement
@@ -145,12 +312,46 @@ def mutate(gene: Gene, rate: float = 0.1) -> Gene:
     mutated = copy.deepcopy(gene)
 
     def mutate_node(node: Any) -> Any:
-        if isinstance(node, ActionNode):
+        if isinstance(node, (ActionTerminal, ActionNode)):
             if random.random() < rate:
                 return random_action()
+        elif isinstance(node, SensorTerminal):
+            if random.random() < rate:
+                return random_sensor()
+        elif isinstance(node, ConstNode):
+            if random.random() < rate:
+                return ConstNode(value=round(random.uniform(0.0, 100.0), 3))
+        elif isinstance(node, IndicatorNode):
+            if random.random() < rate:
+                return random_value(1, None)
+            if node.source:
+                node.source = mutate_node(node.source)
+        elif isinstance(node, ComparisonNode):
+            if random.random() < rate:
+                return random_comparison(1, None)
+            node.left = mutate_node(node.left)
+            node.right = mutate_node(node.right)
+        elif isinstance(node, LogicNode):
+            if random.random() < rate:
+                return random_logic(1, None)
+            node.operands = [mutate_node(o) for o in node.operands]
+        elif isinstance(node, IfNode):
+            if random.random() < rate:
+                cond = random_condition(1, None)
+                return IfNode(condition=cond, on_true=random_action(), on_false=random_action())
+            node.condition = mutate_node(node.condition)
+            if node.on_true:
+                node.on_true = mutate_node(node.on_true)
+            if node.on_false:
+                node.on_false = mutate_node(node.on_false)
         elif isinstance(node, ConditionNode):
             if random.random() < rate:
-                return random_condition()
+                return ConditionNode(
+                    comparator=random.choice(["<", "<=", ">", ">=", "=="]),
+                    threshold=round(random.uniform(0.0, 100.0), 2),
+                    on_true=random_action(),
+                    on_false=random_action(),
+                )
             if node.on_true:
                 node.on_true = mutate_node(node.on_true)
             if node.on_false:
@@ -160,4 +361,3 @@ def mutate(gene: Gene, rate: float = 0.1) -> Gene:
         return node
 
     return mutate_node(mutated)
-

@@ -36,7 +36,16 @@ def _run_code(code: str, api: ZeoneAPI, result_queue: multiprocessing.Queue) -> 
     try:
         exec(code, sandbox_globals, local_env)
         fitness = local_env.get("fitness") or sandbox_globals.get("fitness")
-        result_queue.put({"ok": True, "fitness": fitness})
+        agent_output = local_env.get("agent_output")
+        history = local_env.get("history")
+        result_queue.put(
+            {
+                "ok": True,
+                "fitness": fitness,
+                "agent_output": agent_output,
+                "history": history,
+            }
+        )
     except Exception as e:
         result_queue.put({"ok": False, "error": str(e)})
 
