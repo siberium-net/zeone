@@ -1,10 +1,11 @@
 """
-Lightweight async wrapper around sqlite3 using asyncio.to_thread.
+Lightweight async wrapper around sqlite3.
 
-[RATIONALE] aiosqlite can hang in constrained environments; this wrapper
-provides a minimal async interface (`execute`, `fetchone`, `fetchall`,
-`commit`, `close`) compatible with existing code paths without spawning
-long-lived worker threads.
+[RATIONALE]
+Some environments can hang or deadlock when SQLite operations are executed
+from worker threads. This wrapper provides a minimal async interface
+(`execute`, `fetchone`, `fetchall`, `commit`, `close`) while performing
+SQLite calls synchronously under an asyncio lock.
 """
 
 import asyncio
@@ -19,11 +20,11 @@ class AsyncCursor:
 
     async def fetchone(self) -> Optional[sqlite3.Row]:
         async with self._lock:
-            return await asyncio.to_thread(self._cursor.fetchone)
+            return self._cursor.fetchone()
 
     async def fetchall(self) -> Iterable[sqlite3.Row]:
         async with self._lock:
-            return await asyncio.to_thread(self._cursor.fetchall)
+            return self._cursor.fetchall()
 
 
 class AsyncConnection:
@@ -41,26 +42,25 @@ class AsyncConnection:
 
     async def execute(self, sql: str, params: tuple = ()):
         async with self._lock:
-            cursor = await asyncio.to_thread(self._conn.execute, sql, params)
+            cursor = self._conn.execute(sql, params)
         return AsyncCursor(cursor, self._lock)
 
     async def executemany(self, sql: str, seq_of_params):
         async with self._lock:
-            cursor = await asyncio.to_thread(self._conn.executemany, sql, seq_of_params)
+            cursor = self._conn.executemany(sql, seq_of_params)
         return AsyncCursor(cursor, self._lock)
 
     async def commit(self) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._conn.commit)
+            self._conn.commit()
 
     async def close(self) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._conn.close)
+            self._conn.close()
 
 
 async def connect(path: str, row_factory=None) -> AsyncConnection:
-    conn = await asyncio.to_thread(
-        sqlite3.connect,
+    conn = sqlite3.connect(
         path,
         check_same_thread=False,
         isolation_level=None,  # autocommit; explicit commits still used

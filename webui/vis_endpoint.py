@@ -141,7 +141,13 @@ class CortexVisualizer:
                     trust = 0.5
                     
                     if self.ledger:
-                        trust = await self.ledger.get_trust_score(peer.node_id)
+                        try:
+                            trust = await self.ledger.get_trust_score(peer.node_id)
+                        except RuntimeError as e:
+                            # Ledger may be bound to a different event loop; skip in visualizer.
+                            logger.debug(f"[VIS] Ledger trust fetch skipped: {e}")
+                        except Exception as e:
+                            logger.debug(f"[VIS] Ledger trust fetch error: {e}")
                     
                     # Add node
                     self._nodes[peer_short_id] = VisNode(
@@ -156,7 +162,12 @@ class CortexVisualizer:
                     link_key = f"me-{peer_short_id}"
                     balance = 0
                     if self.ledger:
-                        balance = await self.ledger.get_balance(peer.node_id)
+                        try:
+                            balance = await self.ledger.get_balance(peer.node_id)
+                        except RuntimeError as e:
+                            logger.debug(f"[VIS] Ledger balance fetch skipped: {e}")
+                        except Exception as e:
+                            logger.debug(f"[VIS] Ledger balance fetch error: {e}")
                     
                     self._links[link_key] = VisLink(
                         source="me",
@@ -386,4 +397,3 @@ def generate_demo_graph() -> dict:
     ]
     
     return {"nodes": nodes, "links": links}
-

@@ -26,7 +26,12 @@ from webui.components.downloader import DownloadManager
 from webui.tabs.library import LibraryTab
 from webui.tabs.ingest import IngestTab
 from webui.tabs.activity import ActivityTab
+from webui.tabs.evolution import EvolutionTab
+from webui.tabs.settings import SettingsTab
+from webui.tabs.genesis import GenesisTab
+from webui.tabs.learning import LearningTab
 from webui.components.gallery import Gallery
+from webui.components.human_status import HumanStatusWidget
 from config import NETWORKS, get_current_network
 
 logger = logging.getLogger(__name__)
@@ -139,6 +144,12 @@ class P2PWebUI:
         self.gallery = Gallery()
         self.ingest_tab = IngestTab(self.gallery)
         self.activity_tab = ActivityTab(ui_log_buffer if 'ui_log_buffer' in globals() else deque(maxlen=1000))
+        self.evolution_tab = EvolutionTab(self)
+        self.settings_tab = SettingsTab()
+        self.genesis_tab = GenesisTab(self)
+        self.learning_tab = LearningTab(self)
+        self.human_status = HumanStatusWidget()
+        self._notifications = deque(maxlen=200)
         self.vpn_pathfinder = None
         self._vpn_status_label = None
         self._vpn_enabled = False
@@ -227,10 +238,19 @@ class P2PWebUI:
             with ui.row().classes('items-center gap-4'):
                 # Статус
                 self._status_badge = ui.badge('Offline', color='red')
+
+                # Human Link status
+                try:
+                    self.human_status.mount()
+                except Exception:
+                    pass
                 
                 # Переключатель темы
                 dark = ui.dark_mode(value=self.dark_mode)
                 ui.switch('Dark', on_change=lambda e: dark.set_value(e.value))
+
+                # Notification center
+                ui.button(icon='notifications', on_click=self._open_notifications).props('flat dense')
     
     async def _create_sidebar(self) -> None:
         """Создать боковое меню."""
@@ -248,6 +268,9 @@ class P2PWebUI:
                 ui.button('Storage', icon='folder', on_click=lambda: ui.navigate.to('/storage')).classes('w-full justify-start')
                 ui.button('Compute', icon='memory', on_click=lambda: ui.navigate.to('/compute')).classes('w-full justify-start')
                 ui.button('Ingest', icon='cloud_upload', on_click=lambda: ui.navigate.to('/ingest')).classes('w-full justify-start')
+                ui.button('Evolution', icon='science', on_click=lambda: ui.navigate.to('/evolution')).classes('w-full justify-start')
+                ui.button('Genesis', icon='auto_awesome', on_click=lambda: ui.navigate.to('/genesis')).classes('w-full justify-start')
+                ui.button('Learning', icon='school', on_click=lambda: ui.navigate.to('/learning')).classes('w-full justify-start')
                 
                 ui.separator()
                 
@@ -2151,13 +2174,42 @@ class P2PWebUI:
         self._create_economy_page()
         self._create_storage_page()
         self._create_compute_page()
-        self._create_settings_page()
         self._create_logs_page()
         self._create_ingest_page()
         self.library_tab.create_page()
         self.ingest_tab.create_page(self)
         self.activity_tab.create_page(self)
+        self.evolution_tab.create_page(self)
+        self.settings_tab.create_page(self)
+        self.genesis_tab.create_page(self)
+        self.learning_tab.create_page(self)
         self._setup_websocket_endpoint()
+
+    # ------------------------------------------------------------------
+    # Notification center (simple)
+    # ------------------------------------------------------------------
+
+    def notify(self, message: str, *, type: str = 'info') -> None:
+        try:
+            self._notifications.appendleft({'message': str(message), 'type': str(type), 'ts': datetime.utcnow().isoformat()})
+        except Exception:
+            pass
+        ui.notify(message, type=type)
+
+    def _open_notifications(self) -> None:
+        dlg = ui.dialog()
+        with dlg, ui.card().classes('w-[560px]'):
+            ui.label('Notifications').classes('text-xl font-bold')
+            if not self._notifications:
+                ui.label('No notifications yet.').classes('text-sm text-gray-400')
+            else:
+                with ui.column().classes('gap-2 max-h-[420px] overflow-auto'):
+                    for n in list(self._notifications)[:100]:
+                        ui.label(f"[{n.get('type','info')}] {n.get('message','')}").classes('text-sm font-mono')
+            with ui.row().classes('gap-2 justify-end'):
+                ui.button('Clear', icon='delete', on_click=lambda: self._notifications.clear()).props('flat')
+                ui.button('Close', icon='close', on_click=dlg.close).props('flat')
+        dlg.open()
     
     def run_sync(self, host: str = "0.0.0.0", port: int = 8080) -> None:
         """

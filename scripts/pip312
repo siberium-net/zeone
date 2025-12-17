@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export SETUPTOOLS_USE_DISTUTILS=local
+
+exec "$(dirname "$0")/python312" -m pip "$@"
+

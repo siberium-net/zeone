@@ -19,6 +19,20 @@ docker-compose up
 
 WebUI defaults to `http://localhost:8080`.
 
+## Interface
+
+**Genesis**
+
+![Genesis](docs/interface/genesis.png)
+
+**Network Graph**
+
+![Network Graph](docs/interface/network_graph.png)
+
+**Settings**
+
+![Settings](docs/interface/settings.png)
+
 ## Manual Run (Python 3.11)
 ```bash
 python -m venv .venv && source .venv/bin/activate

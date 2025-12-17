@@ -63,8 +63,8 @@ async def test_neuro_link_tensor_flow():
     """
     head_crypto = Crypto()
     tail_crypto = Crypto()
-    head_codec = WireCodec(head_crypto.signing_key, head_crypto.private_key, head_crypto.verify_key)
-    tail_codec = WireCodec(tail_crypto.signing_key, tail_crypto.private_key, tail_crypto.verify_key)
+    head_codec = WireCodec(head_crypto.signing_key, head_crypto.private_key)
+    tail_codec = WireCodec(tail_crypto.signing_key, tail_crypto.private_key)
 
     part_a = DummyPartA(codec=head_codec, peer_verify=tail_crypto.verify_key)
     part_b = DummyPartB(codec=tail_codec, peer_verify=head_crypto.verify_key)

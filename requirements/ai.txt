@@ -65,8 +65,11 @@ timm>=0.9.0
 # Face Recognition
 # ============================================================================
 
-# InsightFace (uses ONNX Runtime internally)
-insightface>=0.7.0
+# InsightFace is intentionally NOT included here.
+# Reason: recent versions build native extensions and require Python dev headers
+# (e.g. `python3.12-dev` or `python3.11-dev`) and a compiler toolchain.
+# Install separately:
+#   pip install -r requirements/faces.txt
 
 # ONNX Runtime (CPU version - has wheels)
 # For GPU: pip install onnxruntime-gpu>=1.16.0
