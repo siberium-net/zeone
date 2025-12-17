@@ -312,11 +312,6 @@ class Node:
         # [MARKET] AgentManager для обработки запросов услуг
         self.agent_manager = agent_manager
         self.amplifier = amplifier
-        if self.agent_manager and hasattr(self.agent_manager, "set_node"):
-            try:
-                self.agent_manager.set_node(self)
-            except Exception as e:
-                logger.warning(f"[NODE] Failed to attach node to agent manager: {e}")
         
         # Менеджер пиров
         self.peer_manager = PeerManager(max_peers=config.network.max_peers)
@@ -345,6 +340,13 @@ class Node:
         
         # [MARKET] Callback для ответов на запросы услуг
         self._on_service_response: List[Callable[["ServiceResponse", str], Awaitable[None]]] = []
+
+        # Attach node to agents after callbacks are initialized
+        if self.agent_manager and hasattr(self.agent_manager, "set_node"):
+            try:
+                self.agent_manager.set_node(self)
+            except Exception as e:
+                logger.warning(f"[NODE] Failed to attach node to agent manager: {e}")
         
         logger.info(f"[NODE] Initialized with ID: {self.node_id[:16]}...")
     

@@ -31,6 +31,21 @@ class ActionTerminal:
     amount: Optional[float] = None
 
 
+@dataclass
+class AskHumanTerminal:
+    """Leaf node representing a request to the node owner (human-in-the-loop)."""
+
+    query: str
+    options: List[str] = field(default_factory=lambda: ["Approve", "Reject"])
+
+
+@dataclass
+class CheckHumanStatusTerminal:
+    """Leaf node that checks whether the owner is online/linked."""
+
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Expressions / Logic
 # ---------------------------------------------------------------------------

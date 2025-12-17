@@ -1,7 +1,6 @@
 import multiprocessing
-import signal
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Callable, Dict
 
 
 class SandboxedExecutionError(Exception):
@@ -17,7 +16,7 @@ class ZeoneAPI:
     send_message: Callable[[str, str], None]
 
 
-def _run_code(code: str, api: ZeoneAPI, result_queue: multiprocessing.Queue) -> None:
+def _run_code(code: str, api: ZeoneAPI, result_conn: Any) -> None:
     """Execute user code with restricted builtins."""
     safe_builtins: Dict[str, Any] = {
         "True": True,
@@ -38,16 +37,19 @@ def _run_code(code: str, api: ZeoneAPI, result_queue: multiprocessing.Queue) -> 
         fitness = local_env.get("fitness") or sandbox_globals.get("fitness")
         agent_output = local_env.get("agent_output")
         history = local_env.get("history")
-        result_queue.put(
-            {
-                "ok": True,
-                "fitness": fitness,
-                "agent_output": agent_output,
-                "history": history,
-            }
+        result_conn.send(
+            {"ok": True, "fitness": fitness, "agent_output": agent_output, "history": history}
         )
     except Exception as e:
-        result_queue.put({"ok": False, "error": str(e)})
+        try:
+            result_conn.send({"ok": False, "error": str(e)})
+        except Exception:
+            pass
+    finally:
+        try:
+            result_conn.close()
+        except Exception:
+            pass
 
 
 class AgentSandbox:
@@ -61,14 +63,26 @@ class AgentSandbox:
     def run(self, code: str, api: ZeoneAPI) -> Dict[str, Any]:
         """Run code in a separate process with a hard timeout."""
         ctx = multiprocessing.get_context("spawn")
-        result_queue: multiprocessing.Queue = ctx.Queue()
-        proc = ctx.Process(target=_run_code, args=(code, api, result_queue))
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
+        proc = ctx.Process(target=_run_code, args=(code, api, child_conn))
         proc.start()
+        child_conn.close()
         proc.join(self.timeout)
         if proc.is_alive():
             proc.terminate()
+            try:
+                parent_conn.close()
+            except Exception:
+                pass
             return {"ok": False, "error": "timeout"}
         try:
-            return result_queue.get_nowait()
+            if parent_conn.poll(0.01):
+                return parent_conn.recv()
+            return {"ok": False, "error": "no result"}
         except Exception:
             return {"ok": False, "error": "no result"}
+        finally:
+            try:
+                parent_conn.close()
+            except Exception:
+                pass

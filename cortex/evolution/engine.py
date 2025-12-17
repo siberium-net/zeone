@@ -239,21 +239,24 @@ class EvolutionEngine:
 
     @staticmethod
     def _is_safe_logic(logic: str) -> bool:
-        banned = [
-            "import",
-            "exec",
-            "eval",
-            "open(",
-            "__",
-            "os.",
-            "sys.",
-            "subprocess",
-            "socket",
-            "shutil",
-            "pathlib",
+        import re
+
+        # NOTE: Use token-ish patterns to avoid false positives like "evaluate" matching "eval".
+        banned_patterns = [
+            r"\bimport\b",
+            r"\bexec\b",
+            r"\beval\b",
+            r"open\s*\(",
+            r"__",
+            r"\bos\.",
+            r"\bsys\.",
+            r"subprocess",
+            r"socket",
+            r"shutil",
+            r"pathlib",
         ]
         low = logic.lower()
-        return not any(tok in low for tok in banned)
+        return not any(re.search(pat, low) for pat in banned_patterns)
 
 
 async def run_background(engine: EvolutionEngine, interval: float = 5.0):

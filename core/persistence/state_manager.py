@@ -23,6 +23,7 @@ import asyncio
 import json
 import time
 import logging
+import sqlite3
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, List, Any, Set
 from pathlib import Path
@@ -30,11 +31,7 @@ from contextlib import suppress
 
 logger = logging.getLogger(__name__)
 
-try:
-    import aiosqlite
-    AIOSQLITE_AVAILABLE = True
-except ImportError:
-    AIOSQLITE_AVAILABLE = False
+from core.utils.async_db import connect as async_connect
 
 
 @dataclass
@@ -167,11 +164,8 @@ class StateManager:
     
     async def initialize(self) -> None:
         """Инициализация хранилища."""
-        if not AIOSQLITE_AVAILABLE:
-            logger.error("[STATE] aiosqlite not available")
-            return
-        
-        async with aiosqlite.connect(self.db_path) as db:
+        db = await async_connect(self.db_path)
+        try:
             # Таблица состояния узла
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS node_state (
@@ -235,7 +229,9 @@ class StateManager:
             """)
             
             await db.commit()
-        
+        finally:
+            await db.close()
+
         self._initialized = True
         logger.info(f"[STATE] Initialized: {self.db_path}")
     
@@ -255,7 +251,8 @@ class StateManager:
         state.last_saved = time.time()
         
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            db = await async_connect(self.db_path)
+            try:
                 # Сохраняем основное состояние
                 await db.execute("""
                     INSERT OR REPLACE INTO node_state 
@@ -290,7 +287,9 @@ class StateManager:
                     ))
                 
                 await db.commit()
-            
+            finally:
+                await db.close()
+
             # JSON backup
             await self._save_json_backup(state)
             
@@ -315,12 +314,12 @@ class StateManager:
             return None
         
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
+            db = await async_connect(self.db_path, row_factory=sqlite3.Row)
+            try:
                 
                 # Загружаем основное состояние
-                async with db.execute("SELECT * FROM node_state WHERE id = 1") as cursor:
-                    row = await cursor.fetchone()
+                cursor = await db.execute("SELECT * FROM node_state WHERE id = 1")
+                row = await cursor.fetchone()
                 
                 if not row:
                     logger.info("[STATE] No saved state found")
@@ -343,32 +342,36 @@ class StateManager:
                 )
                 
                 # Загружаем пиров
-                async with db.execute("SELECT * FROM peers") as cursor:
-                    async for row in cursor:
-                        peer = PeerRecord(
-                            node_id=row['node_id'],
-                            host=row['host'],
-                            port=row['port'],
-                            first_seen=row['first_seen'] or 0,
-                            last_seen=row['last_seen'] or 0,
-                            last_connected=row['last_connected'] or 0,
-                            connection_count=row['connection_count'] or 0,
-                            failed_connections=row['failed_connections'] or 0,
-                            trust_score=row['trust_score'] or 0.5,
-                            is_bootstrap=bool(row['is_bootstrap']),
-                            supports_dht=bool(row['supports_dht']),
-                            supports_relay=bool(row['supports_relay']),
-                            nat_type=row['nat_type'] or "unknown",
-                            public_ip=row['public_ip'] or "",
-                            public_port=row['public_port'] or 0,
-                        )
-                        state.peers[peer.node_id] = peer
+                cursor = await db.execute("SELECT * FROM peers")
+                peer_rows = await cursor.fetchall()
+                for prow in peer_rows:
+                    peer = PeerRecord(
+                        node_id=prow["node_id"],
+                        host=prow["host"],
+                        port=prow["port"],
+                        first_seen=prow["first_seen"] or 0,
+                        last_seen=prow["last_seen"] or 0,
+                        last_connected=prow["last_connected"] or 0,
+                        connection_count=prow["connection_count"] or 0,
+                        failed_connections=prow["failed_connections"] or 0,
+                        trust_score=prow["trust_score"] or 0.5,
+                        is_bootstrap=bool(prow["is_bootstrap"]),
+                        supports_dht=bool(prow["supports_dht"]),
+                        supports_relay=bool(prow["supports_relay"]),
+                        nat_type=prow["nat_type"] or "unknown",
+                        public_ip=prow["public_ip"] or "",
+                        public_port=prow["public_port"] or 0,
+                    )
+                    state.peers[peer.node_id] = peer
                 
                 # Загружаем bootstrap узлы
-                async with db.execute("SELECT address FROM bootstrap_nodes ORDER BY last_success DESC") as cursor:
-                    async for row in cursor:
-                        state.bootstrap_nodes.append(row['address'])
-            
+                cursor = await db.execute("SELECT address FROM bootstrap_nodes ORDER BY last_success DESC")
+                bs_rows = await cursor.fetchall()
+                for b in bs_rows:
+                    state.bootstrap_nodes.append(b["address"])
+            finally:
+                await db.close()
+
             self._current_state = state
             logger.info(f"[STATE] Loaded: {len(state.peers)} peers, uptime: {state.uptime_total:.0f}s")
             return state
@@ -401,11 +404,9 @@ class StateManager:
         cutoff_time = time.time() - (max_age_hours * 3600)
         
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                
-                # Запрос с фильтрацией и сортировкой
-                async with db.execute("""
+            db = await async_connect(self.db_path, row_factory=sqlite3.Row)
+            try:
+                cursor = await db.execute("""
                     SELECT * FROM peers
                     WHERE trust_score >= ?
                       AND last_connected >= ?
@@ -414,28 +415,30 @@ class StateManager:
                         trust_score * (1.0 * connection_count / (connection_count + failed_connections + 1)) DESC,
                         last_connected DESC
                     LIMIT ?
-                """, (min_trust, cutoff_time, limit)) as cursor:
-                    
-                    peers = []
-                    async for row in cursor:
-                        peer = PeerRecord(
-                            node_id=row['node_id'],
-                            host=row['host'],
-                            port=row['port'],
-                            first_seen=row['first_seen'] or 0,
-                            last_seen=row['last_seen'] or 0,
-                            last_connected=row['last_connected'] or 0,
-                            connection_count=row['connection_count'] or 0,
-                            failed_connections=row['failed_connections'] or 0,
-                            trust_score=row['trust_score'] or 0.5,
-                            is_bootstrap=bool(row['is_bootstrap']),
-                            supports_dht=bool(row['supports_dht']),
-                            supports_relay=bool(row['supports_relay']),
+                """, (min_trust, cutoff_time, limit))
+
+                rows = await cursor.fetchall()
+                peers: List[PeerRecord] = []
+                for row in rows:
+                    peers.append(
+                        PeerRecord(
+                            node_id=row["node_id"],
+                            host=row["host"],
+                            port=row["port"],
+                            first_seen=row["first_seen"] or 0,
+                            last_seen=row["last_seen"] or 0,
+                            last_connected=row["last_connected"] or 0,
+                            connection_count=row["connection_count"] or 0,
+                            failed_connections=row["failed_connections"] or 0,
+                            trust_score=row["trust_score"] or 0.5,
+                            is_bootstrap=bool(row["is_bootstrap"]),
+                            supports_dht=bool(row["supports_dht"]),
+                            supports_relay=bool(row["supports_relay"]),
                         )
-                        peers.append(peer)
-                    
-                    return peers
-                    
+                    )
+                return peers
+            finally:
+                await db.close()
         except Exception as e:
             logger.error(f"[STATE] Get peers failed: {e}")
             return []
@@ -448,7 +451,8 @@ class StateManager:
         now = time.time()
         
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            db = await async_connect(self.db_path)
+            try:
                 await db.execute("""
                     INSERT INTO peers (node_id, host, port, first_seen, last_seen, last_connected, connection_count)
                     VALUES (?, ?, ?, ?, ?, ?, 1)
@@ -460,7 +464,9 @@ class StateManager:
                         connection_count = connection_count + 1
                 """, (node_id, host, port, now, now, now))
                 await db.commit()
-            
+            finally:
+                await db.close()
+
             self._dirty = True
             
         except Exception as e:
@@ -472,13 +478,16 @@ class StateManager:
             return
         
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            db = await async_connect(self.db_path)
+            try:
                 await db.execute("""
                     UPDATE peers SET failed_connections = failed_connections + 1
                     WHERE node_id = ?
                 """, (node_id,))
                 await db.commit()
-            
+            finally:
+                await db.close()
+
             self._dirty = True
             
         except Exception as e:
@@ -490,12 +499,15 @@ class StateManager:
             return
         
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            db = await async_connect(self.db_path)
+            try:
                 await db.execute("""
                     UPDATE peers SET trust_score = ? WHERE node_id = ?
                 """, (trust_score, node_id))
                 await db.commit()
-            
+            finally:
+                await db.close()
+
             self._dirty = True
             
         except Exception as e:
@@ -509,7 +521,8 @@ class StateManager:
         now = time.time()
         
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            db = await async_connect(self.db_path)
+            try:
                 await db.execute("""
                     INSERT INTO bootstrap_nodes (address, added_at, last_success, success_count)
                     VALUES (?, ?, ?, 1)
@@ -518,6 +531,8 @@ class StateManager:
                         success_count = success_count + 1
                 """, (address, now, now))
                 await db.commit()
+            finally:
+                await db.close()
                 
         except Exception as e:
             logger.debug(f"[STATE] Add bootstrap failed: {e}")
@@ -528,14 +543,17 @@ class StateManager:
             return []
         
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                async with db.execute("""
+            db = await async_connect(self.db_path, row_factory=sqlite3.Row)
+            try:
+                cursor = await db.execute("""
                     SELECT address FROM bootstrap_nodes
                     ORDER BY last_success DESC
                     LIMIT ?
-                """, (limit,)) as cursor:
-                    return [row[0] async for row in cursor]
-                    
+                """, (limit,))
+                rows = await cursor.fetchall()
+                return [row["address"] for row in rows]
+            finally:
+                await db.close()
         except Exception as e:
             logger.debug(f"[STATE] Get bootstrap failed: {e}")
             return []
@@ -609,4 +627,3 @@ class StateManager:
             "dirty": self._dirty,
             "current_state": bool(self._current_state),
         }
-

@@ -38,6 +38,9 @@ eth-account>=0.11.0
 # System monitoring (replaces netifaces, has wheels)
 psutil>=5.9.0
 
+# Restricted execution sandbox for agent contracts
+RestrictedPython>=6.2
+
 # HTML parsing for web_reader agent
 beautifulsoup4>=4.12.0
 

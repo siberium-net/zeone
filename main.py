@@ -80,9 +80,16 @@ from core.node import Node
 from core.transport import Crypto, Message, MessageType
 from economy.ledger import Ledger, DEFAULT_DEBT_LIMIT_BYTES
 from agents.manager import AgentManager, ServiceRequest, ServiceResponse
-from core.updater import UpdateManager
 from cortex.pathfinder import VpnPathfinder
 from cortex.amplifier import Amplifier
+
+# Updater (optional, requires GitPython)
+try:
+    from core.updater import UpdateManager
+    UPDATER_AVAILABLE = True
+except ImportError:
+    UpdateManager = None  # type: ignore[assignment]
+    UPDATER_AVAILABLE = False
 
 # Production imports (optional)
 try:
@@ -140,14 +147,6 @@ ui_log_buffer = deque(maxlen=1000)
 ui_handler = UIStreamHandler(ui_log_buffer)
 ui_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(ui_handler)
-
-# Log active blockchain network
-_net = get_current_network()
-logger.info(
-    "[INFO] Starting in NETWORK: %s (%s)",
-    _net["name"],
-    _net["chain_id"],
-)
 
 def format_bytes(num_bytes: float) -> str:
     """Форматировать байты в читаемый вид."""
@@ -1229,6 +1228,13 @@ async def main() -> None:
     """
     Главная функция - точка входа.
     """
+    # Log active blockchain network (kept inside main to avoid noise when main.py is imported)
+    _net = get_current_network()
+    logger.info(
+        "[INFO] Starting in NETWORK: %s (%s)",
+        _net["name"],
+        _net["chain_id"],
+    )
     parser = argparse.ArgumentParser(
         description="P2P Network Node (Layer 3: Market)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1313,6 +1319,35 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    parser.add_argument(
+        "--genesis",
+        action="store_true",
+        help="Run Genesis Protocol on start (auto-adapt to hardware)",
+    )
+    parser.add_argument(
+        "--genesis-epochs",
+        type=int,
+        default=10,
+        help="Genesis epochs (default: 10)",
+    )
+    parser.add_argument(
+        "--genesis-population",
+        type=int,
+        default=20,
+        help="Genesis population size (default: 20)",
+    )
+    parser.add_argument(
+        "--genesis-data-dir",
+        type=str,
+        default="data",
+        help="Genesis output directory (default: data)",
+    )
+    parser.add_argument(
+        "--genesis-niche",
+        type=str,
+        default="",
+        help="Force niche for Genesis (e.g. neural_miner, traffic_weaver, storage_keeper, chain_weaver)",
+    )
     
     # Production arguments
     parser.add_argument(
@@ -1346,6 +1381,23 @@ Examples:
     
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # [GENESIS] Controlled bootstrap (diagnostics + evolution).
+    # Run before any networking / persistence so it works in restricted environments.
+    if args.genesis:
+        try:
+            from cortex.genesis import run_genesis
+
+            result = await run_genesis(
+                epochs=args.genesis_epochs,
+                population=args.genesis_population,
+                data_dir=args.genesis_data_dir,
+                niche=(args.genesis_niche or None),
+            )
+            logger.info("[GENESIS] Complete: %s", result.get("niche"))
+        except Exception as e:
+            logger.error("[GENESIS] Failed: %s", e)
+        return
     
     # Парсим bootstrap узлы
     bootstrap_nodes = parse_bootstrap(args.bootstrap)
@@ -1436,12 +1488,18 @@ Examples:
         cache_agent = None
         logger.warning(f"[AGENTS] CacheProviderAgent unavailable: {e}")
 
-    # Vector store / background ingestion
-    from cortex.archivist.vector_store import VectorStore
-    from cortex.background import IdleWorker
-    vector_store = VectorStore()
-    idle_worker = IdleWorker(ledger=ledger, vector_store=vector_store)
-    await idle_worker.start()
+    # Vector store / background ingestion (optional)
+    idle_worker = None
+    try:
+        from cortex.archivist.vector_store import VectorStore
+        from cortex.background import IdleWorker
+
+        vector_store = VectorStore()
+        idle_worker = IdleWorker(ledger=ledger, vector_store=vector_store)
+        await idle_worker.start()
+    except Exception as e:
+        idle_worker = None
+        logger.warning(f"[CORTEX] IdleWorker disabled: {e}")
     
     # Создаем узел с интегрированным ledger и agent_manager
     node = Node(
@@ -1497,16 +1555,22 @@ Examples:
 
     # Periodic auto-update loop
     if args.auto_update:
-        async def _auto_update_loop():
-            while True:
-                await asyncio.sleep(21600)  # 6 hours
-                has_update, log = updater.check_update_available()
-                if has_update:
-                    logger.info(f"[UPDATER] Update available:\n" + "\n".join(log))
-                    if updater.perform_update():
-                        logger.info("[UPDATER] Update applied, restarting...")
-                        updater.restart_node()
-        asyncio.create_task(_auto_update_loop())
+        if not UPDATER_AVAILABLE or UpdateManager is None:
+            logger.warning("[UPDATER] GitPython not installed, auto-update disabled (pip install gitpython)")
+        else:
+            updater = UpdateManager(str(ROOT_DIR))
+
+            async def _auto_update_loop():
+                while True:
+                    await asyncio.sleep(21600)  # 6 hours
+                    has_update, log = updater.check_update_available()
+                    if has_update:
+                        logger.info(f"[UPDATER] Update available:\n" + "\n".join(log))
+                        if updater.perform_update():
+                            logger.info("[UPDATER] Update applied, restarting...")
+                            updater.restart_node()
+
+            asyncio.create_task(_auto_update_loop())
     
     # [DHT] Инициализируем Kademlia DHT
     kademlia = None
