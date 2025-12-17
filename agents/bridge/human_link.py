@@ -213,6 +213,17 @@ class HumanLinkAgent:
         """Return True if a chat is linked."""
         return self._chat_id is not None
 
+    def status_snapshot(self) -> Dict[str, Any]:
+        """Return a small status dict suitable for UI."""
+        chat_id = self._chat_id
+        return {
+            "online": self.is_human_online(),
+            "chat_id": chat_id,
+            "auth_code": self._auth_code,
+            "has_token": bool(self.bot_token),
+            "pending": len(self._pending),
+        }
+
 
 _human_link: Optional[HumanLinkAgent] = None
 
@@ -223,4 +234,3 @@ def get_human_link() -> HumanLinkAgent:
     if _human_link is None:
         _human_link = HumanLinkAgent()
     return _human_link
-

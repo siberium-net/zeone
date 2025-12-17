@@ -69,6 +69,14 @@ class PrivacyCollector:
         self._buffer.clear()
         logger.info("[LEARNING] Data collection DISABLED")
 
+    @property
+    def enabled(self) -> bool:
+        return bool(self._enabled)
+
+    @property
+    def session_hash(self) -> str:
+        return str(self._session_hash)
+
     def record_preference(self, chosen: str, rejected: str, context: Optional[str] = None) -> None:
         if not self._enabled:
             return
@@ -138,6 +146,10 @@ class PrivacyCollector:
             "acceptance_rate": 0.0,
             "avg_correction_time_ms": 0.0,
             "avg_edit_distance": 0.0,
+            # Optional per-type breakdown (e.g. action names or suggestion categories).
+            "acceptance_by_type": {},
+            "rejection_by_type": {},
+            "top_accepted_types": [],
         }
 
         if acceptances + rejections > 0:
@@ -146,6 +158,26 @@ class PrivacyCollector:
         if corrections:
             stats["avg_correction_time_ms"] = sum(float(s.data.get("time_ms", 0.0)) for s in corrections) / len(corrections)
             stats["avg_edit_distance"] = sum(int(s.data.get("edit_distance", 0)) for s in corrections) / len(corrections)
+
+        acceptance_by_type: Dict[str, int] = {}
+        rejection_by_type: Dict[str, int] = {}
+        for s in self._buffer:
+            if s.signal_type not in (SignalType.ACCEPTANCE, SignalType.REJECTION):
+                continue
+            t = s.data.get("type")
+            if not isinstance(t, str) or not t.strip():
+                continue
+            key = t.strip()[:64]
+            if s.signal_type == SignalType.ACCEPTANCE:
+                acceptance_by_type[key] = acceptance_by_type.get(key, 0) + 1
+            else:
+                rejection_by_type[key] = rejection_by_type.get(key, 0) + 1
+
+        stats["acceptance_by_type"] = acceptance_by_type
+        stats["rejection_by_type"] = rejection_by_type
+        stats["top_accepted_types"] = [
+            k for k, _v in sorted(acceptance_by_type.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        ]
 
         return stats
 
@@ -169,4 +201,3 @@ class PrivacyCollector:
                 curr_row.append(min(insertions, deletions, substitutions))
             prev_row = curr_row
         return prev_row[-1]
-

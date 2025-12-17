@@ -332,6 +332,75 @@ def _slugify(text: str) -> str:
     return slug[:64]
 
 
+def apply_collector_stats(spec: Dict[str, Any], stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Apply PrivacyCollector aggregated stats to a species spec.
+
+    When humans frequently accept certain suggestion types (e.g. action names),
+    include those actions in the base grammar so evolution can leverage them.
+    """
+    if not isinstance(spec, dict) or not isinstance(stats, dict) or not stats:
+        return spec
+
+    grammar = spec.get("grammar")
+    if not isinstance(grammar, dict):
+        return spec
+
+    actions = grammar.get("actions")
+    if not isinstance(actions, list):
+        return spec
+
+    existing_names = set(_extract_action_names(actions))
+    candidates: list[str] = []
+
+    top = stats.get("top_accepted_types")
+    if isinstance(top, list):
+        for t in top:
+            if isinstance(t, str) and t.strip():
+                candidates.append(t.strip())
+
+    if not candidates:
+        by_type = stats.get("acceptance_by_type")
+        if isinstance(by_type, dict):
+            for k, _v in sorted(by_type.items(), key=lambda kv: kv[1], reverse=True):
+                if isinstance(k, str) and k.strip():
+                    candidates.append(k.strip())
+
+    added = 0
+    for name in candidates:
+        safe = _sanitize_action_name(name)
+        if not safe or safe in existing_names:
+            continue
+        actions.append({"name": safe, "params": {}})
+        existing_names.add(safe)
+        added += 1
+        if added >= 5:
+            break
+
+    grammar["actions"] = actions
+    spec["grammar"] = grammar
+    return spec
+
+
+def _extract_action_names(actions: list) -> list[str]:
+    names: list[str] = []
+    for item in actions:
+        if isinstance(item, str) and item.strip():
+            names.append(item.strip())
+        elif isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip():
+            names.append(item["name"].strip())
+    return names
+
+
+def _sanitize_action_name(name: str) -> str:
+    n = (name or "").strip()
+    if not n:
+        return ""
+    if not re.match(r"^[a-zA-Z0-9_:\-]{1,64}$", n):
+        n = _slugify(n)
+    return n[:64]
+
+
 class SpeciesArchitect:
     """
     High-level facade that uses IntellectualCore to build a species spec.
@@ -340,7 +409,22 @@ class SpeciesArchitect:
     def __init__(self, core: Optional[IntellectualCore] = None):
         self.core = core or IntellectualCore()
 
-    async def design(self, user_goal: str) -> Dict[str, Any]:
+    async def design(
+        self,
+        user_goal: str,
+        *,
+        collector: Optional[Any] = None,
+        collector_stats: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         raw = await self.core.generate_spec(user_goal)
-        return sanitize_species_spec(raw, user_goal=user_goal)
+        spec = sanitize_species_spec(raw, user_goal=user_goal)
 
+        stats = collector_stats
+        if stats is None and collector is not None and hasattr(collector, "get_aggregated_stats"):
+            try:
+                stats = collector.get_aggregated_stats()
+            except Exception as e:
+                logger.debug("[ARCHITECT] Collector stats unavailable: %s", e)
+                stats = None
+
+        return apply_collector_stats(spec, stats)

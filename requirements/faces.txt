@@ -1,0 +1,20 @@
+# ZEONE Face Recognition Dependencies
+# ==================================
+# Optional add-on for face embeddings / clustering via InsightFace.
+#
+# [BUILD NOTE]
+# insightface>=0.7.x builds native extensions and requires Python headers:
+# - If your venv uses Python 3.12: install `python3.12-dev`
+# - If your venv uses Python 3.11: install `python3.11-dev`
+#
+# You also need a compiler toolchain (gcc/g++/make).
+#
+# Install:
+#   pip install -r requirements/faces.txt
+
+# Keep these aligned with `requirements/ai.txt` pins to avoid solver conflicts.
+numpy>=1.24.0,<2.0.0
+opencv-python-headless>=4.8.0,<4.12.0
+protobuf>=4.21.0,<5.0.0
+onnxruntime>=1.16.0,<2.0.0
+insightface>=0.7.0

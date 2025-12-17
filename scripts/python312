@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Python 3.12 venv helper.
+# Some legacy build backends still expect `distutils` in Python 3.12;
+# this enables setuptools' local distutils shim during builds.
+export SETUPTOOLS_USE_DISTUTILS=local
+
+exec "$(dirname "$0")/../.venv312/bin/python" "$@"
+
