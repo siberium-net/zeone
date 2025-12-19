@@ -86,3 +86,4 @@ dmypy.json
 *.temp
 *.bak
 *~
+node_state_backup.json
