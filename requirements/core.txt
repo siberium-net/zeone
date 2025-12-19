@@ -41,6 +41,9 @@ psutil>=5.9.0
 # Restricted execution sandbox for agent contracts
 RestrictedPython>=6.2
 
+# MCP protocol (Model Context Protocol)
+mcp>=1.24.0
+
 # HTML parsing for web_reader agent
 beautifulsoup4>=4.12.0
 

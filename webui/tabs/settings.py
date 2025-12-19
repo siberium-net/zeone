@@ -58,6 +58,9 @@ def _cli_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-shell", action="store_true")
     p.add_argument("--webui", "-w", action="store_true")
     p.add_argument("--webui-port", type=int, default=8080)
+    p.add_argument("--mcp", action="store_true")
+    p.add_argument("--mcp-host", type=str, default="0.0.0.0")
+    p.add_argument("--mcp-port", type=int, default=8090)
     p.add_argument("--auto-update", action="store_true")
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--genesis", action="store_true")
@@ -274,6 +277,24 @@ class SettingsTab:
                     requires_restart=True,
                 )
                 self._cli_row(
+                    "MCP enabled",
+                    value=str(bool(self._args.mcp)),
+                    source="CLI" if _flag_present(self._argv, ("--mcp",)) else "default",
+                    requires_restart=True,
+                )
+                self._cli_row(
+                    "MCP host",
+                    value=str(self._args.mcp_host),
+                    source="CLI" if _flag_present(self._argv, ("--mcp-host",)) else "default",
+                    requires_restart=True,
+                )
+                self._cli_row(
+                    "MCP port",
+                    value=str(self._args.mcp_port),
+                    source="CLI" if _flag_present(self._argv, ("--mcp-port",)) else "default",
+                    requires_restart=True,
+                )
+                self._cli_row(
                     "Metrics enabled",
                     value=str(bool(self._args.metrics)),
                     source="CLI" if _flag_present(self._argv, ("--metrics",)) else "default",
@@ -404,6 +425,9 @@ class SettingsTab:
                 ui.label("Monitoring / Security").classes("text-lg font-semibold")
                 webui_enabled = ui.switch("WebUI enabled", value=bool(overrides.get("webui", bool(self._args.webui))))
                 webui_port = ui.number("WebUI port", value=_try_int(overrides.get("webui_port", self._args.webui_port)) or int(self._args.webui_port)).classes("w-96")
+                mcp_enabled = ui.switch("MCP enabled", value=bool(overrides.get("mcp", bool(self._args.mcp))))
+                mcp_host = ui.input("MCP host", value=str(overrides.get("mcp_host", self._args.mcp_host))).classes("w-96")
+                mcp_port = ui.number("MCP port", value=_try_int(overrides.get("mcp_port", self._args.mcp_port)) or int(self._args.mcp_port)).classes("w-96")
                 metrics = ui.switch("Metrics enabled", value=bool(overrides.get("metrics", bool(self._args.metrics))))
                 health_port = ui.number("Health port", value=_try_int(overrides.get("health_port", self._args.health_port)) or int(self._args.health_port)).classes("w-96")
                 exit_node = ui.switch("Exit node mode", value=bool(overrides.get("exit_node", bool(self._args.exit_node))))
@@ -414,6 +438,9 @@ class SettingsTab:
 
                 webui_enabled.on("change", lambda e: set_override("webui", e.value))
                 webui_port.on("change", lambda e: set_override("webui_port", e.value))
+                mcp_enabled.on("change", lambda e: set_override("mcp", e.value))
+                mcp_host.on("change", lambda e: set_override("mcp_host", e.value))
+                mcp_port.on("change", lambda e: set_override("mcp_port", e.value))
                 metrics.on("change", lambda e: set_override("metrics", e.value))
                 health_port.on("change", lambda e: set_override("health_port", e.value))
                 exit_node.on("change", lambda e: set_override("exit_node", e.value))
@@ -446,6 +473,9 @@ class SettingsTab:
                 add_flag("--no-shell", overrides.get("no_shell", self._args.no_shell))
                 add_flag("--webui", overrides.get("webui", self._args.webui))
                 add_kv("--webui-port", overrides.get("webui_port", self._args.webui_port))
+                add_flag("--mcp", overrides.get("mcp", self._args.mcp))
+                add_kv("--mcp-host", overrides.get("mcp_host", self._args.mcp_host))
+                add_kv("--mcp-port", overrides.get("mcp_port", self._args.mcp_port))
                 add_flag("--auto-update", overrides.get("auto_update", self._args.auto_update))
                 add_flag("--verbose", overrides.get("verbose", self._args.verbose))
                 add_flag("--metrics", overrides.get("metrics", self._args.metrics))

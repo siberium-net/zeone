@@ -1310,6 +1310,23 @@ Examples:
         help="Web UI port (default: 8080)",
     )
     parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Enable MCP SSE server (default port: 8090)",
+    )
+    parser.add_argument(
+        "--mcp-host",
+        type=str,
+        default="0.0.0.0",
+        help="MCP server bind host (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--mcp-port",
+        type=int,
+        default=8090,
+        help="MCP server port (default: 8090)",
+    )
+    parser.add_argument(
         "--auto-update",
         action="store_true",
         help="Enable auto-update from git with periodic checks",
@@ -1707,6 +1724,33 @@ Examples:
             cortex = None
     else:
         logger.info("[CORTEX] Not available (module not installed)")
+
+    # [MCP] Optional MCP SSE server
+    mcp_server = None
+    mcp_task: Optional[asyncio.Task] = None
+    if args.mcp:
+        try:
+            from core.mcp_server import ZeoneMCPServer, MCPConfig
+
+            mcp_server = ZeoneMCPServer(
+                node=node,
+                ledger=ledger,
+                agent_manager=agent_manager,
+                cortex=cortex,
+                log_buffer=ui_log_buffer,
+                mcp_config=MCPConfig(
+                    host=args.mcp_host,
+                    port=args.mcp_port,
+                ),
+            )
+            mcp_task = mcp_server.start_sse()
+            logger.info(
+                "[MCP] SSE server running on http://%s:%s/mcp/sse",
+                args.mcp_host,
+                args.mcp_port,
+            )
+        except Exception as e:
+            logger.warning(f"[MCP] Failed to start: {e}")
     
     # Graceful shutdown
     shutdown_event = asyncio.Event()
@@ -1811,6 +1855,10 @@ Examples:
             await kademlia.stop()
         if idle_worker:
             await idle_worker.stop()
+        if mcp_task:
+            mcp_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await mcp_task
         await node.stop()
         await ledger.close()
         logger.info("[MAIN] Shutdown complete")
