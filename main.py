@@ -204,6 +204,7 @@ async def interactive_shell(
     dos_protector = None,
     health_checker = None,
     metrics_collector = None,
+    shutdown_event: Optional[asyncio.Event] = None,
 ) -> None:
     """
     Интерактивная оболочка для взаимодействия с узлом.
@@ -232,10 +233,40 @@ async def interactive_shell(
     print("Type 'help' for commands, 'quit' to exit")
     print("=" * 60 + "\n")
     
-    while True:
+    async def _read_input(prompt: str) -> Optional[str]:
         try:
+            from aioconsole import ainput  # type: ignore
+        except Exception:
             loop = asyncio.get_event_loop()
-            line = await loop.run_in_executor(None, lambda: input(">>> ").strip())
+            return await loop.run_in_executor(None, lambda: input(prompt))
+
+        input_task = asyncio.create_task(ainput(prompt))
+        if shutdown_event is None:
+            return await input_task
+
+        stop_task = asyncio.create_task(shutdown_event.wait())
+        done, _pending = await asyncio.wait(
+            {input_task, stop_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stop_task in done:
+            input_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await input_task
+            return None
+        stop_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await stop_task
+        return input_task.result()
+
+    while True:
+        if shutdown_event is not None and shutdown_event.is_set():
+            break
+        try:
+            line = await _read_input(">>> ")
+            if line is None:
+                break
+            line = line.strip()
             
             if not line:
                 continue
@@ -1217,8 +1248,8 @@ Ledger Statistics:
         except EOFError:
             print("\n[INFO] EOF received, shutting down...")
             break
-        except KeyboardInterrupt:
-            print("\n[INFO] Interrupted, shutting down...")
+        except EOFError:
+            print("\n[INFO] EOF received, shutting down...")
             break
         except Exception as e:
             print(f"[ERROR] {e}")
@@ -1755,14 +1786,27 @@ Examples:
     # Graceful shutdown
     shutdown_event = asyncio.Event()
     
+    signal_state = {"sigint_count": 0}
+
     def signal_handler():
+        signal_state["sigint_count"] += 1
+        if signal_state["sigint_count"] == 1:
+            print("\nнажмите еще раз Ctrl+C чтобы завершить работу")
+            return
+        logger.info("[MAIN] Received shutdown signal")
+        shutdown_event.set()
+
+    def term_handler():
         logger.info("[MAIN] Received shutdown signal")
         shutdown_event.set()
     
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, signal_handler)
+            if sig == signal.SIGINT:
+                loop.add_signal_handler(sig, signal_handler)
+            else:
+                loop.add_signal_handler(sig, term_handler)
         except NotImplementedError:
             pass
     
@@ -1799,6 +1843,7 @@ Examples:
                     dos_protector=dos_protector,
                     health_checker=health_checker,
                     metrics_collector=metrics_collector,
+                    shutdown_event=shutdown_event,
                 )
         elif args.no_shell:
             logger.info("[MAIN] Running in daemon mode. Press Ctrl+C to stop.")
@@ -1810,6 +1855,7 @@ Examples:
                 dos_protector=dos_protector,
                 health_checker=health_checker,
                 metrics_collector=metrics_collector,
+                shutdown_event=shutdown_event,
             )
     finally:
         # [PRODUCTION] Save state before shutdown
