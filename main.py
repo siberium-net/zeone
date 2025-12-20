@@ -76,7 +76,7 @@ except ImportError:
     pass  # python-dotenv не установлен
 
 from config import config, get_current_network, ZEONE_NETWORK
-from core.node import Node
+from core.node import Node, detect_public_ip, is_private_ip, is_public_ip
 from core.transport import Crypto, Message, MessageType
 from economy.ledger import Ledger, DEFAULT_DEBT_LIMIT_BYTES
 from agents.manager import AgentManager, ServiceRequest, ServiceResponse
@@ -1298,8 +1298,8 @@ Examples:
     parser.add_argument(
         "--bootstrap", "-b",
         type=str,
-        default="",
-        help="Bootstrap nodes (comma-separated host:port)",
+        default="boot.ze1.org:80",
+        help="Bootstrap nodes (comma-separated host:port, default: boot.ze1.org:80)",
     )
     parser.add_argument(
         "--identity", "-i",
@@ -1339,6 +1339,29 @@ Examples:
         type=int,
         default=8080,
         help="Web UI port (default: 8080)",
+    )
+    parser.add_argument(
+        "--vpn-client",
+        action="store_true",
+        help="Auto-start SOCKS5 client on startup",
+    )
+    parser.add_argument(
+        "--socks-port",
+        type=int,
+        default=getattr(config, "socks_port", 1080),
+        help="Local SOCKS5 port (default: 1080)",
+    )
+    parser.add_argument(
+        "--public-ip",
+        type=str,
+        default=getattr(config, "public_ip", ""),
+        help="Explicit public IP for exit node advertisement",
+    )
+    parser.add_argument(
+        "--vpn-region",
+        type=str,
+        default=getattr(config, "vpn_region", ""),
+        help="Preferred exit region for VPN client (e.g. US, DE)",
     )
     parser.add_argument(
         "--mcp",
@@ -1426,9 +1449,16 @@ Examples:
     )
     
     args = parser.parse_args()
-    
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # Sync CLI overrides into config (env can set defaults, CLI wins).
+    config.socks_port = int(args.socks_port)
+    config.vpn_region = (args.vpn_region or "").strip()
+    config.public_ip = (args.public_ip or "").strip()
+    if args.vpn_client:
+        config.vpn_mode = "client"
 
     # [GENESIS] Controlled bootstrap (diagnostics + evolution).
     # Run before any networking / persistence so it works in restricted environments.
@@ -1658,13 +1688,37 @@ Examples:
             except Exception:
                 pass
 
+    publish_ip = ""
+    if vpn_exit_enabled:
+        publish_ip = (config.public_ip or "").strip()
+        if not publish_ip:
+            publish_ip = (args.public_ip or "").strip()
+        if not publish_ip:
+            try:
+                publish_ip = await detect_public_ip(timeout_s=2.0) or ""
+            except Exception:
+                publish_ip = ""
+        if not publish_ip:
+            publish_ip = args.host
+        if not is_public_ip(publish_ip):
+            if publish_ip in {"0.0.0.0", "127.0.0.1"} or is_private_ip(publish_ip):
+                logger.warning(
+                    "[VPN] Exit node public IP not set; using %s (may be unreachable)",
+                    publish_ip,
+                )
+            else:
+                logger.warning(
+                    "[VPN] Exit node public IP appears non-public: %s",
+                    publish_ip,
+                )
+
     async def _publish_exit_loop() -> None:
         if not (vpn_exit_enabled and pathfinder):
             return
         # Initial publish
         try:
             await pathfinder.publish_exit(
-                ip=args.host,
+                ip=publish_ip,
                 geo=getattr(config, "vpn_exit_country", "UN"),
                 price=getattr(config, "vpn_exit_price", 0.1),
             )
@@ -1674,7 +1728,7 @@ Examples:
             await asyncio.sleep(600)
             try:
                 await pathfinder.publish_exit(
-                    ip=args.host,
+                    ip=publish_ip,
                     geo=getattr(config, "vpn_exit_country", "UN"),
                     price=getattr(config, "vpn_exit_price", 0.1),
                 )
@@ -1700,6 +1754,7 @@ Examples:
         strategy: str = "fastest",
         region: str = "any",
         enable_accel: bool = True,
+        listen_port: Optional[int] = None,
     ) -> Dict[str, Any]:
         nonlocal socks_server
         await stop_vpn_client()
@@ -1715,7 +1770,7 @@ Examples:
             return {"ok": False, "message": "No exit node found"}
 
         amp = amplifier if enable_accel else None
-        listen_port = getattr(config, "socks_port", 1080)
+        listen_port = listen_port or getattr(config, "socks_port", 1080)
         try:
             socks = SocksServer(
                 node=node,
@@ -1727,6 +1782,11 @@ Examples:
             socks_server = socks
             vpn_client_state["exit_id"] = selected["node_id"]
             vpn_client_state["latency"] = selected.get("latency")
+            logger.info(
+                "[VPN] SOCKS5 listening on 127.0.0.1:%s -> Exit Node %s",
+                listen_port,
+                selected["node_id"][:12],
+            )
             return {
                 "ok": True,
                 "message": "Connected",
@@ -1736,6 +1796,20 @@ Examples:
         except Exception as e:
             logger.warning(f"[VPN] Failed to start SOCKS client: {e}")
             return {"ok": False, "message": str(e)}
+
+    if args.vpn_client:
+        if not pathfinder:
+            logger.warning("[VPN] Pathfinder unavailable; cannot start VPN client")
+        else:
+            region = (args.vpn_region or config.vpn_region or "any").strip() or "any"
+            result = await start_vpn_client(
+                strategy="fastest",
+                region=region,
+                enable_accel=True,
+                listen_port=args.socks_port,
+            )
+            if not result.get("ok"):
+                logger.warning("[VPN] SOCKS5 start failed: %s", result.get("message", "unknown_error"))
     
     # [CORTEX] Инициализируем Cortex - Автономную Систему Знаний
     cortex = None

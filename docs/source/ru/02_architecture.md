@@ -106,6 +106,18 @@ Legacy `SimpleTransport` использовал простой формат:
 | 0x51 | BALANCE_CLAIM | Request |
 | 0x52 | BALANCE_ACK | Response |
 
+### 1.2.0 Параметры VPN (Runtime)
+
+Операционные флаги для VPN/SOCKS5:
+
+- `--exit-node` публикует узел как VPN exit (`service:vpn_exit` в DHT).
+- `--public-ip` задаёт адрес для объявления exit-узла; если не задан, выполняется авто-детект, иначе используется `--host` с предупреждением при частном адресе или `0.0.0.0`.
+- `--vpn-client` автоматически запускает локальный SOCKS5 клиент.
+- `--socks-port` задаёт локальный порт SOCKS5 (по умолчанию `1080`).
+- `--vpn-region` предпочтительный регион выхода (например, `US`, `DE`).
+
+Перекрытия через ENV: `PUBLIC_IP`, `VPN_REGION`, `SOCKS_PORT`, `VPN_MODE=client|exit`.
+
 ### 1.2.1 Hard Fork Notice
 
 **[BREAKING CHANGE]** Binary Wire Protocol реализует Hard Fork:

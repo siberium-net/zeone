@@ -50,7 +50,7 @@ def _cli_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--port", "-p", type=int, default=config.network.default_port)
     p.add_argument("--host", "-H", type=str, default="0.0.0.0")
-    p.add_argument("--bootstrap", "-b", type=str, default="")
+    p.add_argument("--bootstrap", "-b", type=str, default="boot.ze1.org:80")
     p.add_argument("--identity", "-i", type=str, default=config.crypto.identity_file)
     p.add_argument("--db", "-d", type=str, default=config.ledger.database_path)
     p.add_argument("--debt-limit", type=int, default=DEFAULT_DEBT_LIMIT_BYTES)

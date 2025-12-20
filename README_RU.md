@@ -26,10 +26,35 @@ pip install -r requirements.txt
 python main.py --port 8468 --webui --webui-port 8080
 ```
 
+Bootstrap по умолчанию: `boot.ze1.org:80` (переопределяется через `--bootstrap`).
+
 Подключить второй узел:
 ```bash
 python main.py --port 8469 --bootstrap 127.0.0.1:8468 --webui --webui-port 8081
 ```
+
+## VPN / SOCKS5 (CLI)
+
+Exit-узел (реклама публичного IP):
+```bash
+python main.py --exit-node --public-ip 1.2.3.4
+```
+
+Клиент (локальный SOCKS5 на 127.0.0.1:9999):
+```bash
+python main.py --vpn-client --socks-port 9999 --vpn-region US
+curl --socks5-hostname 127.0.0.1:9999 https://ifconfig.me
+```
+
+## MCP (SSE)
+
+```bash
+python main.py --mcp --mcp-port 8090
+```
+
+Эндпоинты:
+- `http://localhost:8090/mcp/sse`
+- `http://localhost:8090/mcp/messages`
 
 ## Документация
 - Сборка: `python build_docs.py`

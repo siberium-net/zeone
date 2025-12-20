@@ -47,6 +47,16 @@ EXPLORER_URL: str = _SELECTED["explorer_url"]  # type: ignore
 TOKEN_SYMBOL: str = _SELECTED["symbol"]  # type: ignore
 CONTRACT_ADDRESS: str = _SELECTED["contract_address"]  # type: ignore
 
+# VPN / Socks environment overrides
+VPN_MODE: str = os.getenv("VPN_MODE", "off").lower()
+VPN_REGION: str = os.getenv("VPN_REGION", "").strip()
+PUBLIC_IP: str = os.getenv("PUBLIC_IP", "").strip()
+SOCKS_PORT_ENV = os.getenv("SOCKS_PORT", "").strip()
+try:
+    SOCKS_PORT: int = int(SOCKS_PORT_ENV) if SOCKS_PORT_ENV else 1080
+except ValueError:
+    SOCKS_PORT = 1080
+
 
 @dataclass
 class NetworkConfig:
@@ -201,10 +211,12 @@ class Config:
     security: SecurityConfig = field(default_factory=SecurityConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     # VPN / Socks defaults
-    vpn_mode: str = "off"            # off | client | exit
+    vpn_mode: str = VPN_MODE         # off | client | exit
+    vpn_region: str = VPN_REGION     # Preferred exit region (client)
+    public_ip: str = PUBLIC_IP       # Explicit public IP for exit node
     vpn_exit_price: float = 0.1      # price per MB
     vpn_exit_country: str = "UN"     # country code of exit node
-    socks_port: int = 1080
+    socks_port: int = SOCKS_PORT
 
 
 # Глобальный экземпляр конфигурации

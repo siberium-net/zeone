@@ -21,6 +21,7 @@ import asyncio
 import logging
 import time
 import socket
+import ipaddress
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Set, Callable, Awaitable, Any, Tuple, TYPE_CHECKING
 from contextlib import suppress
@@ -41,6 +42,72 @@ if TYPE_CHECKING:
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
+
+
+def is_public_ip(value: str) -> bool:
+    """Return True if value is a public IP address."""
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_unspecified
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+    )
+
+
+def is_private_ip(value: str) -> bool:
+    """Return True if value is a private/loopback/unspecified IP."""
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_unspecified or ip.is_link_local
+
+
+async def detect_public_ip(timeout_s: float = 2.0) -> Optional[str]:
+    """
+    Best-effort public IP detection via STUN or HTTPS.
+    Returns None on failure.
+    """
+    # Try STUN first (no external HTTP dependency).
+    try:
+        from core.nat import STUNClient
+
+        stun = STUNClient()
+        mapped = await asyncio.wait_for(stun.get_mapped_address(0), timeout=timeout_s)
+        if mapped and getattr(mapped, "ip", ""):
+            if is_public_ip(mapped.ip):
+                return mapped.ip
+    except Exception:
+        pass
+
+    # Fallback to simple HTTPS services.
+    urls = (
+        "https://ident.me",
+        "https://ifconfig.me/ip",
+        "https://api.ipify.org",
+    )
+    try:
+        import aiohttp  # type: ignore
+    except Exception:
+        return None
+
+    for url in urls:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=timeout_s) as resp:
+                    text = (await resp.text()).strip()
+            if is_public_ip(text):
+                return text
+        except Exception:
+            continue
+
+    return None
 
 
 @dataclass

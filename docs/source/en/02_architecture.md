@@ -106,6 +106,18 @@ Binary format for production with strict security requirements:
 | 0x51 | BALANCE_CLAIM | Request |
 | 0x52 | BALANCE_ACK | Response |
 
+### 1.2.0 VPN Runtime Flags
+
+Operational flags for VPN/SOCKS5:
+
+- `--exit-node` publishes this node as a VPN exit (`service:vpn_exit` in DHT).
+- `--public-ip` overrides the advertised exit address; if omitted, auto-detection is attempted, otherwise `--host` is used with a warning when it is private or `0.0.0.0`.
+- `--vpn-client` auto-starts a local SOCKS5 client.
+- `--socks-port` sets the local SOCKS5 port (default: `1080`).
+- `--vpn-region` preferred exit region (e.g., `US`, `DE`).
+
+Environment overrides: `PUBLIC_IP`, `VPN_REGION`, `SOCKS_PORT`, `VPN_MODE=client|exit`.
+
 ### 1.2.1 Hard Fork Notice
 
 **[BREAKING CHANGE]** Binary Wire Protocol implements a Hard Fork:
