@@ -35,6 +35,7 @@ class VpnSession:
     client_peer_id: str
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
+    client_peer: Optional["Peer"] = None
     inbound_buffer: StreamingBuffer = field(default_factory=StreamingBuffer)
     outbound_seq: int = 0
     closed: bool = False
@@ -182,6 +183,7 @@ class VpnExitAgent(BaseAgent):
             target_host=target_host,
             target_port=target_port,
             client_peer_id=peer.node_id,
+            client_peer=peer,
         )
 
     async def _handle_stream_message(self, message: Message, peer: "Peer") -> None:
@@ -196,6 +198,8 @@ class VpnExitAgent(BaseAgent):
 
         session = self.sessions.get(session_id)
         if not session or session.closed or session.client_peer_id != peer.node_id:
+            return
+        if session.client_peer and peer is not session.client_peer:
             return
 
         stream_msg = StreamingMessage.from_payload(
@@ -242,6 +246,7 @@ class VpnExitAgent(BaseAgent):
         target_host: Optional[str],
         target_port: int,
         client_peer_id: str,
+        client_peer: Optional["Peer"] = None,
     ) -> Tuple[bool, str]:
         if not self._node:
             return False, "Node not attached"
@@ -271,6 +276,7 @@ class VpnExitAgent(BaseAgent):
             target_host=target_host,
             target_port=target_port,
             client_peer_id=client_peer_id,
+            client_peer=client_peer,
             reader=reader,
             writer=writer,
         )
@@ -278,7 +284,7 @@ class VpnExitAgent(BaseAgent):
         async with self._lock:
             self.sessions[session_id] = session
 
-        await self._send_connect_result(client_peer_id, session_id, True, "")
+        await self._send_connect_result(client_peer_id, session_id, True, "", client_peer=client_peer)
 
         asyncio.create_task(self._pipe_remote_to_peer(session))
         logger.info(
@@ -301,17 +307,17 @@ class VpnExitAgent(BaseAgent):
                     eof=False,
                 )
                 session.outbound_seq += 1
-                sent = await self._send_stream(session.client_peer_id, stream_msg)
+                sent = await self._send_stream(session.client_peer_id, stream_msg, session.client_peer)
                 if sent:
                     session.bytes_to_client += len(chunk)
                     await self._bill_usage(session.client_peer_id, len(chunk))
         except Exception as e:
             logger.warning(f"[VPN] Pipe error ({session.session_id}): {e}")
         finally:
-            await self._send_close_message(session.client_peer_id, session.session_id, "remote_closed")
+            await self._send_close_message(session.client_peer_id, session.session_id, "remote_closed", session.client_peer)
             await self._close_session(session.session_id, reason="remote_closed")
 
-    async def _send_stream(self, peer_id: str, stream: StreamingMessage) -> bool:
+    async def _send_stream(self, peer_id: str, stream: StreamingMessage, peer: Optional["Peer"] = None) -> bool:
         if not self._node:
             return False
         message = Message(
@@ -319,6 +325,9 @@ class VpnExitAgent(BaseAgent):
             payload={**stream.to_payload(), "session_id": stream.stream_id},
             sender_id=self._node.node_id,
         )
+        if peer and peer.is_connected:
+            signed = self._node.crypto.sign_message(message)
+            return await peer.send(signed, self._node.use_masking)
         return await self._node.send_to(peer_id, message, with_accounting=False)
 
     async def _send_connect_result(
@@ -327,6 +336,7 @@ class VpnExitAgent(BaseAgent):
         session_id: str,
         ok: bool,
         error: str,
+        client_peer: Optional["Peer"] = None,
     ) -> None:
         if not self._node:
             return
@@ -340,9 +350,19 @@ class VpnExitAgent(BaseAgent):
             },
             sender_id=self._node.node_id,
         )
+        if client_peer and client_peer.is_connected:
+            signed = self._node.crypto.sign_message(message)
+            await client_peer.send(signed, self._node.use_masking)
+            return
         await self._node.send_to(peer_id, message, with_accounting=False)
 
-    async def _send_close_message(self, peer_id: str, session_id: str, reason: str) -> None:
+    async def _send_close_message(
+        self,
+        peer_id: str,
+        session_id: str,
+        reason: str,
+        client_peer: Optional["Peer"] = None,
+    ) -> None:
         if not self._node:
             return
         message = Message(
@@ -350,6 +370,10 @@ class VpnExitAgent(BaseAgent):
             payload={"session_id": session_id, "reason": reason},
             sender_id=self._node.node_id,
         )
+        if client_peer and client_peer.is_connected:
+            signed = self._node.crypto.sign_message(message)
+            await client_peer.send(signed, self._node.use_masking)
+            return
         await self._node.send_to(peer_id, message, with_accounting=False)
 
     async def _close_session(self, session_id: str, reason: str = "") -> None:
