@@ -76,7 +76,14 @@ except ImportError:
     pass  # python-dotenv не установлен
 
 from config import config, get_current_network, ZEONE_NETWORK
-from core.node import Node, detect_public_ip, is_private_ip, is_public_ip
+from core.node import (
+    Node,
+    detect_public_ip,
+    get_local_ipv4,
+    is_private_ip,
+    is_public_ip,
+    resolve_host_ips,
+)
 from core.transport import Crypto, Message, MessageType
 from economy.ledger import Ledger, DEFAULT_DEBT_LIMIT_BYTES
 from agents.manager import AgentManager, ServiceRequest, ServiceResponse
@@ -193,6 +200,44 @@ def parse_bootstrap(bootstrap_str: str) -> List[Tuple[str, int]]:
             port = config.network.default_port
         nodes.append((host, port))
     return nodes
+
+
+def filter_bootstrap_nodes(
+    nodes: List[Tuple[str, int]],
+    *,
+    self_host: str,
+    self_port: int,
+    public_ip: str = "",
+) -> List[Tuple[str, int]]:
+    """Remove self-referential bootstrap entries."""
+    self_ips: set[str] = set()
+    if self_host and self_host != "0.0.0.0":
+        if is_public_ip(self_host) or is_private_ip(self_host):
+            self_ips.add(self_host)
+    if public_ip and is_public_ip(public_ip):
+        self_ips.add(public_ip)
+    local_ip = get_local_ipv4()
+    if local_ip:
+        self_ips.add(local_ip)
+
+    filtered: List[Tuple[str, int]] = []
+    skipped: List[Tuple[str, int]] = []
+    for host, port in nodes:
+        if port != self_port:
+            filtered.append((host, port))
+            continue
+        if host in {"localhost", "127.0.0.1"}:
+            skipped.append((host, port))
+            continue
+        resolved = resolve_host_ips(host)
+        if host in self_ips or "127.0.0.1" in resolved or (resolved & self_ips):
+            skipped.append((host, port))
+            continue
+        filtered.append((host, port))
+
+    if skipped:
+        logger.info("[BOOTSTRAP] Skipping self bootstrap entries: %s", skipped)
+    return filtered
 
 
 async def interactive_shell(
@@ -1498,6 +1543,12 @@ Examples:
     
     # Парсим bootstrap узлы
     bootstrap_nodes = parse_bootstrap(args.bootstrap)
+    bootstrap_nodes = filter_bootstrap_nodes(
+        bootstrap_nodes,
+        self_host=args.host,
+        self_port=args.port,
+        public_ip=config.public_ip,
+    )
     logger.info(f"[BOOTSTRAP] Parsed bootstrap args: {bootstrap_nodes}")
     if bootstrap_nodes:
         config.network.bootstrap_nodes = bootstrap_nodes

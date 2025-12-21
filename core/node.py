@@ -110,6 +110,31 @@ async def detect_public_ip(timeout_s: float = 2.0) -> Optional[str]:
     return None
 
 
+def resolve_host_ips(host: str) -> set[str]:
+    """Resolve host to IPv4 addresses (best-effort)."""
+    ips: set[str] = set()
+    try:
+        for info in socket.getaddrinfo(host, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip:
+                ips.add(ip)
+    except Exception:
+        pass
+    return ips
+
+
+def get_local_ipv4() -> Optional[str]:
+    """Best-effort local IPv4 detection."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        local_ip = sock.getsockname()[0]
+        sock.close()
+        return local_ip
+    except Exception:
+        return None
+
+
 @dataclass
 class Peer:
     """
@@ -506,13 +531,42 @@ class Node:
         - Любой узел может быть bootstrap-узлом
         """
         for host, port in config.network.bootstrap_nodes:
-            if host == self.host and port == self.port:
+            if self._is_self_bootstrap(host, port):
                 continue  # Не подключаемся к себе
             
             try:
                 await self.connect_to_peer(host, port)
             except Exception as e:
                 logger.warning(f"[NODE] Failed to connect to bootstrap {host}:{port}: {e}")
+
+    def _is_self_bootstrap(self, host: str, port: int) -> bool:
+        if port != self.port:
+            return False
+
+        if host in {"localhost", "127.0.0.1"}:
+            return True
+
+        self_ips: set[str] = set()
+        if self.host and self.host != "0.0.0.0":
+            if is_public_ip(self.host) or is_private_ip(self.host):
+                self_ips.add(self.host)
+
+        public_ip = getattr(config, "public_ip", "").strip()
+        if public_ip and is_public_ip(public_ip):
+            self_ips.add(public_ip)
+
+        local_ip = get_local_ipv4()
+        if local_ip:
+            self_ips.add(local_ip)
+
+        if host in self_ips:
+            return True
+
+        resolved = resolve_host_ips(host)
+        if "127.0.0.1" in resolved:
+            return True
+
+        return bool(resolved & self_ips)
     
     async def connect_to_peer(self, host: str, port: int) -> Optional[Peer]:
         """

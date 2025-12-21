@@ -114,3 +114,5 @@
 *   **Примечание:** Human Link через Telegram: `agents/bridge/human_link.py` (офлайн-режим без `TELEGRAM_BOT_TOKEN`). Терминалы для грамматики добавлены в `cortex/evolution/grammar.py`.
 
 
+
+

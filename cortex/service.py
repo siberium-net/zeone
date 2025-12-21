@@ -202,8 +202,10 @@ class CortexService:
 
         if self._evo_task:
             self._evo_task.cancel()
-            with suppress(Exception):
+            try:
                 await self._evo_task
+            except asyncio.CancelledError:
+                pass
         
         logger.info("[CORTEX] Service stopped")
     
