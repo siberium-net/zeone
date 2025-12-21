@@ -233,16 +233,32 @@ async def interactive_shell(
     print("Type 'help' for commands, 'quit' to exit")
     print("=" * 60 + "\n")
     
-    async def _read_input(prompt: str) -> Optional[str]:
-        try:
-            from aioconsole import ainput  # type: ignore
-        except Exception:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, lambda: input(prompt))
+    stdin_reader: Optional[asyncio.StreamReader] = None
+    loop = asyncio.get_event_loop()
+    try:
+        stdin_reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(stdin_reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    except Exception:
+        stdin_reader = None
 
-        input_task = asyncio.create_task(ainput(prompt))
+    async def _read_input(prompt: str) -> Optional[str]:
+        print(prompt, end="", flush=True)
+
+        if stdin_reader is not None:
+            input_task = asyncio.create_task(stdin_reader.readline())
+        else:
+            input_task = asyncio.create_task(
+                asyncio.to_thread(lambda: sys.stdin.readline())
+            )
+
         if shutdown_event is None:
-            return await input_task
+            line = await input_task
+            if line in (b"", ""):
+                return None
+            if isinstance(line, bytes):
+                line = line.decode(errors="ignore")
+            return line
 
         stop_task = asyncio.create_task(shutdown_event.wait())
         done, _pending = await asyncio.wait(
@@ -251,13 +267,16 @@ async def interactive_shell(
         )
         if stop_task in done:
             input_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await input_task
             return None
         stop_task.cancel()
         with suppress(asyncio.CancelledError):
             await stop_task
-        return input_task.result()
+        line = input_task.result()
+        if line in (b"", ""):
+            return None
+        if isinstance(line, bytes):
+            line = line.decode(errors="ignore")
+        return line
 
     while True:
         if shutdown_event is not None and shutdown_event.is_set():
@@ -1869,6 +1888,10 @@ Examples:
             return
         logger.info("[MAIN] Received shutdown signal")
         shutdown_event.set()
+        try:
+            sys.stdin.close()
+        except Exception:
+            pass
 
     def term_handler():
         logger.info("[MAIN] Received shutdown signal")
