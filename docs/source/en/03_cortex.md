@@ -930,6 +930,83 @@ neuro_link.register_activation_handler(on_activation)
 
 ---
 
+## 8. Evolution (GGGP): Node Adaptation
+
+GGGP evolution acts as an adaptation layer: the node selects a niche, loads a species template, and evolves an agent under local constraints.
+
+### 8.1 Genesis + Self‑Awareness
+
+- **SelfAwareness** (`cortex/self.py`) builds a `NodeProfile` (CPU/GPU/RAM/disk/network).
+- **GenesisProtocol** (`cortex/genesis.py`) selects the dominant niche and starts `EvolutionEngine`.
+
+### 8.2 Species Template (spec)
+
+Species specs live in `cortex/evolution/species.py` and have four parts:
+
+```python
+species_spec = {
+    "species": {
+        "name": "neural_miner",
+        "goal": "Maximize profit from GPU rental...",
+        "domain": "compute",
+        "description": "Manages GPU workloads and pricing",
+    },
+    "grammar": {
+        "sensors": ["gpu_load", "gpu_temperature", "queue_length", "my_balance"],
+        "actions": ["accept_job", "reject_job", "adjust_price_up", "adjust_price_down"],
+        "rule_count": {"min": 3, "max": 8},
+        "max_depth": 3,
+    },
+    "fitness": {
+        "objective": "maximize_profit",
+        "signals": ["final_balance", "actions"],
+        "notes": "MVP uses final_balance proxy.",
+    },
+    "fitness_logic": "def evaluate(agent_output, history): ...",
+}
+```
+
+- `grammar` defines GGGP terminals (sensors/actions) and complexity bounds.
+- `fitness_logic` is compiled once and executed in a sandbox (`cortex/evolution/engine.py`).
+
+### 8.3 Optimized Parameters by Niche
+
+| Niche | Sensors (inputs) | Actions | Optimizes |
+|---|---|---|---|
+| NeuralMiner | gpu_load, gpu_temperature, queue_length, current_job_price, my_balance | accept/reject, price up/down, download_model | GPU profit under thermal/queue constraints |
+| TrafficWeaver | bandwidth_usage, packet_loss, ping_to_peers, active_connections, my_balance | price up/down, drop/add peer, caching | throughput/profit vs latency/packet_loss |
+| StorageKeeper | disk_usage_percent, chunk_popularity, chunk_age_days, trust_score, my_balance | store/delete, replicate, price up/down | hit‑rate and revenue under disk limits |
+| Arbitrageur | price_sibr, price_inference, price_storage, market_volatility, my_balance | buy/sell/hold | arbitrage profit |
+| ChainWeaver | gas_price, pending_settlements, stake_amount, my_balance_chain | settle/deploy/stake/unstake | gas minimization vs throughput/rewards |
+
+### 8.4 Fitness Metrics (actual sources)
+
+Today `fitness_logic` uses `final_balance` as a proxy. Real evolution needs concrete metrics:
+
+- **Economy**: `ledger.balance_delta`, `trust_score`, `debt_limit` (`economy/ledger.py`).
+- **Network**: RTT, loss, bytes_sent/received (`core/node.py`).
+- **VPN**: bytes/latency per session (`agents/vpn.py`, `core/socks_proxy.py`).
+- **Storage/DHT**: hit‑rate, chunk age (`core/dht/storage.py`, cache provider).
+- **GPU**: load/temp/VRAM (pynvml/torch, `cortex/self.py`).
+- **Chain**: gas_price, pending settlements (`economy/chain.py`).
+
+These metrics control the levers exposed by actions: pricing, accept/reject, replication, staking, scheduling.
+
+### 8.5 A “Hard” Task for EVO
+
+Examples that resist simple heuristics:
+
+- **Dynamic GPU pricing** under thermal, queue, and energy constraints.
+- **Routing/peering** as a multi‑objective problem (throughput, latency, profit, risk).
+- **Storage caching**: decide store/delete/replicate under disk pressure.
+- **On‑chain scheduling**: optimize for gas windows and staking yield.
+
+### 8.6 Next Steps (toward real evolution)
+
+1. Wire sensors to real data (Node/ledger/VPN/Storage).
+2. Extend `fitness_logic` to multi‑objective scoring.
+3. Feed historical signals from Collector for stable metrics.
+
 ## References
 
 1. Florence-2: Advancing a Unified Representation for a Variety of Vision Tasks (Microsoft, 2023)
@@ -939,4 +1016,3 @@ neuro_link.register_activation_handler(on_activation)
 5. InsightFace: https://github.com/deepinsight/insightface
 6. GPipe: Easy Scaling with Micro-Batch Pipeline Parallelism (Google, 2019)
 7. PipeDream: Fast and Efficient Pipeline Parallel DNN Training (Microsoft, 2018)
-

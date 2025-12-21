@@ -930,6 +930,83 @@ neuro_link.register_activation_handler(on_activation)
 
 ---
 
+## 8. Evolution (GGGP): адаптация узла
+
+GGGP‑эволюция работает как механизм адаптации: узел выбирает нишу, получает шаблон вида и эволюционирует агента под свои ограничения и цели.
+
+### 8.1 Genesis + Self‑Awareness
+
+- **SelfAwareness** (`cortex/self.py`) собирает `NodeProfile` (CPU/GPU/RAM/диск/сеть).
+- **GenesisProtocol** (`cortex/genesis.py`) выбирает доминантную нишу и запускает `EvolutionEngine`.
+
+### 8.2 Шаблон ниши (species spec)
+
+Спецификация вида хранится в `cortex/evolution/species.py` и состоит из 4 частей:
+
+```python
+species_spec = {
+    "species": {
+        "name": "neural_miner",
+        "goal": "Maximize profit from GPU rental...",
+        "domain": "compute",
+        "description": "Manages GPU workloads and pricing",
+    },
+    "grammar": {
+        "sensors": ["gpu_load", "gpu_temperature", "queue_length", "my_balance"],
+        "actions": ["accept_job", "reject_job", "adjust_price_up", "adjust_price_down"],
+        "rule_count": {"min": 3, "max": 8},
+        "max_depth": 3,
+    },
+    "fitness": {
+        "objective": "maximize_profit",
+        "signals": ["final_balance", "actions"],
+        "notes": "MVP uses final_balance proxy.",
+    },
+    "fitness_logic": "def evaluate(agent_output, history): ...",
+}
+```
+
+- `grammar` задаёт терминалы GGGP (сенсоры/действия) и границы сложности.
+- `fitness_logic` компилируется один раз и выполняется в sandbox (`cortex/evolution/engine.py`).
+
+### 8.3 Оптимизируемые параметры по нишам
+
+| Ниша | Сенсоры (inputs) | Управляемые действия | Что оптимизируется |
+|---|---|---|---|
+| NeuralMiner | gpu_load, gpu_temperature, queue_length, current_job_price, my_balance | accept/reject, price up/down, download_model | прибыль GPU при контроле температуры/очереди |
+| TrafficWeaver | bandwidth_usage, packet_loss, ping_to_peers, active_connections, my_balance | price up/down, drop/add peer, caching | throughput/прибыль vs latency/packet_loss |
+| StorageKeeper | disk_usage_percent, chunk_popularity, chunk_age_days, trust_score, my_balance | store/delete, replicate, price up/down | hit‑rate и доход при ограничении диска |
+| Arbitrageur | price_sibr, price_inference, price_storage, market_volatility, my_balance | buy/sell/hold | прибыль от арбитража |
+| ChainWeaver | gas_price, pending_settlements, stake_amount, my_balance_chain | settle/deploy/stake/unstake | минимизация gas при росте throughput/дохода |
+
+### 8.4 Метрики для фитнес‑функции (актуальные источники)
+
+Сейчас `fitness_logic` в MVP использует `final_balance` как прокси. Для "реальных" ниш нужны наблюдаемые метрики:
+
+- **Экономика**: `ledger.balance_delta`, `trust_score`, `debt_limit` (`economy/ledger.py`).
+- **Сеть**: RTT, потери, bytes_sent/received (`core/node.py`).
+- **VPN**: bytes/latency по сессиям (`agents/vpn.py`, `core/socks_proxy.py`).
+- **Storage/DHT**: hit‑rate, возраст чанков (`core/dht/storage.py`, cache provider).
+- **GPU**: загрузка/температура/VRAM (pynvml/torch, `cortex/self.py`).
+- **Chain**: gas_price, pending settlements (`economy/chain.py`).
+
+Эти метрики напрямую влияют на решения агента: цену, принятие задач, репликацию, стейк и расписание транзакций.
+
+### 8.5 "Задача по зубам" для EVO
+
+Примеры задач, которые плохо решаются простыми правилами:
+
+- **Динамическое ценообразование GPU** с ограничениями по температуре, очереди и энергозатратам.
+- **Сетевой роутинг/пиринг** как multi‑objective (throughput, latency, прибыль, риск).
+- **Storage‑кэш**: выбор, что хранить/удалять, с учётом популярности и издержек.
+- **On‑chain планирование**: выбирать окна газ‑цены и стратегию стейкинга.
+
+### 8.6 Что дальше (для реальной эволюции)
+
+1. Привязать сенсоры к реальным данным (Node/ledger/VPN/Storage).
+2. Расширить `fitness_logic` под multi‑objective (прибыль, стабильность, риск).
+3. Добавить исторические логи/Collector для устойчивых метрик.
+
 ## Ссылки
 
 1. Florence-2: Advancing a Unified Representation for a Variety of Vision Tasks (Microsoft, 2023)
@@ -939,4 +1016,3 @@ neuro_link.register_activation_handler(on_activation)
 5. InsightFace: https://github.com/deepinsight/insightface
 6. GPipe: Easy Scaling with Micro-Batch Pipeline Parallelism (Google, 2019)
 7. PipeDream: Fast and Efficient Pipeline Parallel DNN Training (Microsoft, 2018)
-

@@ -1,6 +1,6 @@
 [🇺🇸 Read in English](README.md)
 
-![ZEONE](https://img.shields.io/badge/version-v1.0.0-blue) ![Python](https://img.shields.io/badge/python-3.12%2B-blueviolet) ![License](https://img.shields.io/badge/license-MIT-black) ![Network](https://img.shields.io/badge/network-Sovereign-green)
+![ZEONE](https://img.shields.io/badge/version-v1.2.4-blue) ![Python](https://img.shields.io/badge/python-3.12%2B-blueviolet) ![License](https://img.shields.io/badge/license-MIT-black) ![Network](https://img.shields.io/badge/network-Sovereign-green)
 
 # ZEONE — децентрализованная операционная система для когнитивного интернета
 

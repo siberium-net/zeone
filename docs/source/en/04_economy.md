@@ -44,6 +44,13 @@ balance < 0  →  We owe peer (we consumed more)
 balance = 0  →  Balance settled
 ```
 
+#### Note: accounting units (current implementation)
+
+- The ledger stores **credit units**. Transport uses bytes, services use service cost, VPN uses price per MB.
+- `debt_limit` applies across all debts, so **units are mixed**.
+- On‑chain settlement uses **SIBR**, but IOU → SIBR mapping is not unified yet.
+- Expect occasional `balance mismatch` logs due to unit mismatch and asymmetric accounting.
+
 ### 1.3 Database Schema
 
 SQLite table `balances`:

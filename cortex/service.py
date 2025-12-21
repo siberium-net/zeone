@@ -45,6 +45,8 @@ class CortexConfig:
     max_concurrent_investigations: int = 2
     default_bounty_reward: float = 10.0
     default_council_budget: float = 50.0
+    evolution_interval: float = 5.0
+    evolution_log_every: int = 10
 
 
 class CortexService:
@@ -186,7 +188,13 @@ class CortexService:
         try:
             self.evolution_engine = EvolutionEngine()
             self.evolution_engine.initialize_population()
-            self._evo_task = asyncio.create_task(run_background(self.evolution_engine, interval=5.0))
+            self._evo_task = asyncio.create_task(
+                run_background(
+                    self.evolution_engine,
+                    interval=self.config.evolution_interval,
+                    log_every=self.config.evolution_log_every,
+                )
+            )
             logger.info("[CORTEX] Evolution engine started")
         except Exception as e:
             logger.warning(f"[CORTEX] Evolution engine failed to start: {e}")

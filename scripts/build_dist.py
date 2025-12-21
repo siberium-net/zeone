@@ -38,7 +38,7 @@ DIST_DIR = PROJECT_ROOT / "dist"
 SPEC_FILE = BUILD_DIR / "zeone.spec"
 
 # Version from package or default
-VERSION = "1.0.0"
+VERSION = "1.2.4"
 try:
     # Try to get version from git tag
     result = subprocess.run(
@@ -410,4 +410,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

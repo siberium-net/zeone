@@ -259,8 +259,29 @@ class EvolutionEngine:
         return not any(re.search(pat, low) for pat in banned_patterns)
 
 
-async def run_background(engine: EvolutionEngine, interval: float = 5.0):
+async def run_background(
+    engine: EvolutionEngine,
+    interval: float = 5.0,
+    log_every: int = 10,
+) -> None:
+    best_seen: Optional[float] = None
     while True:
         best, avg, _ = await engine.run_epoch()
-        logger.info(f"[EVO] Gen {engine.generation}: Max Fitness {best:.2f}, Avg {avg:.2f}")
+
+        if best_seen is None or best > best_seen:
+            best_seen = best
+            logger.info(
+                "[EVO] Gen %s: Max Fitness %.2f, Avg %.2f (new best)",
+                engine.generation,
+                best,
+                avg,
+            )
+        elif log_every and engine.generation % log_every == 0:
+            logger.info(
+                "[EVO] Gen %s: Max Fitness %.2f, Avg %.2f",
+                engine.generation,
+                best,
+                avg,
+            )
+
         await asyncio.sleep(interval)

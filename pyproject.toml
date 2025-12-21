@@ -15,7 +15,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zeone"
-version = "1.0.0"
+version = "1.2.4"
 description = "Decentralized P2P Network with AI, VPN, Storage, and Economy"
 readme = "README.md"
 requires-python = ">=3.9"
