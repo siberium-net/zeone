@@ -170,7 +170,12 @@ class VpnPathfinder:
             })
 
         if not scored:
-            return None
+            fallback = filtered[0]
+            logger.warning(
+                "[VPN] All exit probes failed; using unprobed exit %s",
+                str(fallback.get("node_id", ""))[:12],
+            )
+            return fallback
 
         strategy = strategy or "fastest"
         if strategy == "cheapest":

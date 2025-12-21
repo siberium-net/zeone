@@ -1872,14 +1872,26 @@ Examples:
             logger.warning("[VPN] Pathfinder unavailable; cannot start VPN client")
         else:
             region = (args.vpn_region or config.vpn_region or "any").strip() or "any"
-            result = await start_vpn_client(
-                strategy="fastest",
-                region=region,
-                enable_accel=True,
-                listen_port=args.socks_port,
-            )
-            if not result.get("ok"):
-                logger.warning("[VPN] SOCKS5 start failed: %s", result.get("message", "unknown_error"))
+            async def _vpn_client_autostart() -> None:
+                delay = 5.0
+                while True:
+                    result = await start_vpn_client(
+                        strategy="fastest",
+                        region=region,
+                        enable_accel=True,
+                        listen_port=args.socks_port,
+                    )
+                    if result.get("ok"):
+                        return
+                    message = result.get("message", "unknown_error")
+                    if message != "No exit node found":
+                        logger.warning("[VPN] SOCKS5 start failed: %s", message)
+                        return
+                    logger.info("[VPN] No exit nodes yet; retrying in %.0fs", delay)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 1.5, 60.0)
+
+            vpn_tasks.append(asyncio.create_task(_vpn_client_autostart()))
     
     # [CORTEX] Инициализируем Cortex - Автономную Систему Знаний
     cortex = None
