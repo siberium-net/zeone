@@ -1839,6 +1839,29 @@ Examples:
         if not selected or not selected.get("node_id"):
             return {"ok": False, "message": "No exit node found"}
 
+        exit_host = selected.get("ip") or selected.get("host")
+        exit_port = int(selected.get("port", config.network.default_port))
+        peer = node.peer_manager.get_peer(selected["node_id"])
+        if not peer or not peer.is_connected:
+            if not exit_host:
+                return {"ok": False, "message": "Exit node missing address"}
+            peer = await node.connect_to_peer(exit_host, exit_port)
+        if not peer or not peer.is_connected:
+            logger.warning(
+                "[VPN] Exit node unreachable: %s:%s (%s)",
+                exit_host,
+                exit_port,
+                selected["node_id"][:12],
+            )
+            return {"ok": False, "message": "Exit node unreachable"}
+        if peer.node_id != selected["node_id"]:
+            logger.warning(
+                "[VPN] Exit node ID mismatch (DHT=%s, peer=%s); using peer ID",
+                selected["node_id"][:12],
+                peer.node_id[:12],
+            )
+            selected["node_id"] = peer.node_id
+
         amp = amplifier if enable_accel else None
         listen_port = listen_port or getattr(config, "socks_port", 1080)
         try:
@@ -1874,6 +1897,11 @@ Examples:
             region = (args.vpn_region or config.vpn_region or "any").strip() or "any"
             async def _vpn_client_autostart() -> None:
                 delay = 5.0
+                retriable = {
+                    "No exit node found",
+                    "Exit node unreachable",
+                    "Exit node missing address",
+                }
                 while True:
                     result = await start_vpn_client(
                         strategy="fastest",
@@ -1884,10 +1912,10 @@ Examples:
                     if result.get("ok"):
                         return
                     message = result.get("message", "unknown_error")
-                    if message != "No exit node found":
+                    if message not in retriable:
                         logger.warning("[VPN] SOCKS5 start failed: %s", message)
                         return
-                    logger.info("[VPN] No exit nodes yet; retrying in %.0fs", delay)
+                    logger.info("[VPN] Exit not available (%s); retrying in %.0fs", message, delay)
                     await asyncio.sleep(delay)
                     delay = min(delay * 1.5, 60.0)
 
