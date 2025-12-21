@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION_PRIMARY: "3.10"
+  PYTHON_VERSION_PRIMARY: "3.12"
   COVERAGE_THRESHOLD: 80
 
 jobs:
@@ -89,11 +89,19 @@ jobs:
       fail-fast: false  # Don't cancel other jobs if one fails
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.10", "3.11"]
-        exclude:
-          # Exclude some combinations to reduce CI time if needed
-          # - os: macos-latest
-          #   python-version: "3.11"
+        python-version: ["3.11", "3.12"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.13"
+            allow-failure: true
+          - os: windows-latest
+            python-version: "3.13"
+            allow-failure: true
+          - os: macos-latest
+            python-version: "3.13"
+            allow-failure: true
+
+    continue-on-error: ${{ matrix.allow-failure || false }}
 
     steps:
       - name: "[CHECKOUT] Clone Repository"
@@ -129,7 +137,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
 
       - name: "[COVERAGE] Upload Coverage to Codecov"
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == env.PYTHON_VERSION_PRIMARY
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage.xml
@@ -268,4 +276,3 @@ jobs:
           fi
           
           echo "[OK] CI Pipeline Passed!"
-

@@ -1,6 +1,6 @@
 [🇷🇺 Читать на русском](README_RU.md)
 
-![ZEONE](https://img.shields.io/badge/version-v1.0.0-blue) ![Python](https://img.shields.io/badge/python-3.11-blueviolet) ![License](https://img.shields.io/badge/license-MIT-black) ![Network](https://img.shields.io/badge/network-Sovereign-green)
+![ZEONE](https://img.shields.io/badge/version-v1.0.0-blue) ![Python](https://img.shields.io/badge/python-3.12%2B-blueviolet) ![License](https://img.shields.io/badge/license-MIT-black) ![Network](https://img.shields.io/badge/network-Sovereign-green)
 
 # ZEONE — decentralized operating system for the cognitive internet
 
@@ -33,7 +33,7 @@ WebUI defaults to `http://localhost:8080`.
 
 ![Settings](docs/interface/settings.png)
 
-## Manual Run (Python 3.11)
+## Manual Run (Python 3.12+)
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
