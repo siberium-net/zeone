@@ -44,6 +44,9 @@ class SimpleAPI:
     def send_message(self, peer: str, msg: str) -> None:
         self._log(f"send_message to {peer}: {msg}")
 
+    def get_history_value(self, sensor: str, steps_back: int = 1) -> float:
+        return 0.0
+
     # Legacy actions used by old genomes
     def buy(self, amount: float = 1.0) -> None:
         self.balance -= float(amount)

@@ -30,9 +30,11 @@ from webui.tabs.evolution import EvolutionTab
 from webui.tabs.settings import SettingsTab
 from webui.tabs.genesis import GenesisTab
 from webui.tabs.learning import LearningTab
+from webui.tabs.cinema import CinemaTab
 from webui.components.gallery import Gallery
 from webui.components.human_status import HumanStatusWidget
 from config import NETWORKS, get_current_network
+from cortex.media.service import MediaService
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +150,12 @@ class P2PWebUI:
         self.settings_tab = SettingsTab()
         self.genesis_tab = GenesisTab(self)
         self.learning_tab = LearningTab(self)
+        self.media_service = MediaService(
+            kademlia=self.kademlia,
+            dht_storage=self.kademlia.storage if self.kademlia else None,
+            ledger=self.ledger,
+        )
+        self.cinema_tab = CinemaTab(self.media_service)
         self.human_status = HumanStatusWidget()
         self._notifications = deque(maxlen=200)
         self.vpn_pathfinder = None
@@ -268,6 +276,7 @@ class P2PWebUI:
                 ui.button('Storage', icon='folder', on_click=lambda: ui.navigate.to('/storage')).classes('w-full justify-start')
                 ui.button('Compute', icon='memory', on_click=lambda: ui.navigate.to('/compute')).classes('w-full justify-start')
                 ui.button('Ingest', icon='cloud_upload', on_click=lambda: ui.navigate.to('/ingest')).classes('w-full justify-start')
+                ui.button('Cinema', icon='movie', on_click=lambda: ui.navigate.to('/cinema')).classes('w-full justify-start')
                 ui.button('Evolution', icon='science', on_click=lambda: ui.navigate.to('/evolution')).classes('w-full justify-start')
                 ui.button('Genesis', icon='auto_awesome', on_click=lambda: ui.navigate.to('/genesis')).classes('w-full justify-start')
                 ui.button('Learning', icon='school', on_click=lambda: ui.navigate.to('/learning')).classes('w-full justify-start')
@@ -2183,6 +2192,7 @@ class P2PWebUI:
         self.settings_tab.create_page(self)
         self.genesis_tab.create_page(self)
         self.learning_tab.create_page(self)
+        self.cinema_tab.create_page(self)
         self._setup_websocket_endpoint()
 
     # ------------------------------------------------------------------

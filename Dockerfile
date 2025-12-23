@@ -78,6 +78,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     libffi8 \
     libsodium23 \
+    # Media + torrent runtime deps
+    ffmpeg \
+    python3-libtorrent \
     # Networking tools (useful for debugging)
     netcat-openbsd \
     curl \

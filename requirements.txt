@@ -10,6 +10,9 @@
 # Core (always required)
 -r requirements/core.txt
 
+# Torrent (prefer system package: python3-libtorrent)
+python-libtorrent>=2.0.0; platform_system == "Linux"
+
 # WebUI (recommended)
 -r requirements/webui.txt
 

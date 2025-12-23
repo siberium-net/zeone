@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from nicegui import ui
 
 from cortex.ai_interface import IntellectualCore
+from cortex.evolution.challenges import PricingChallenge
 from cortex.evolution.engine import EvolutionEngine, SimpleAPI
 from cortex.evolution.genetics import compile_genome
 from cortex.evolution.sandbox import AgentSandbox
@@ -39,6 +40,8 @@ class EvolutionTab:
         self._chart = None
         self._log = None
         self._best_code = None
+        self._market_chart = None
+        self._market_status = None
 
         # State
         self._species_spec: Dict[str, Any] = {}
@@ -52,6 +55,10 @@ class EvolutionTab:
         self._max_fitness: List[float] = []
         self._avg_fitness: List[float] = []
         self._best_code_text: str = ""
+        self._market_times: List[str] = []
+        self._market_prices: List[float] = []
+        self._market_demand: List[float] = []
+        self._market_running = False
 
     # ------------------------------------------------------------------
     # Page
@@ -114,6 +121,18 @@ class EvolutionTab:
                     self._chart = ui.echart(self._chart_options()).classes("w-full h-64")
 
                     self._log = ui.log(max_lines=1000).classes("w-full h-48")
+
+                    with ui.card().classes("w-full"):
+                        ui.label("Market Simulation").classes("text-lg font-semibold")
+                        self._market_status = ui.label("Idle").classes("text-sm text-gray-400")
+                        ui.button(
+                            "Run Market Simulation",
+                            icon="timeline",
+                            on_click=self._on_run_market_simulation,
+                        ).props("color=secondary").classes("w-full")
+                        self._market_chart = ui.echart(self._market_chart_options()).classes(
+                            "w-full h-64"
+                        )
 
                     with ui.card().classes("w-full"):
                         ui.label("Best Agent Code").classes("text-lg font-semibold mb-2")
@@ -280,6 +299,43 @@ class EvolutionTab:
             logger.exception("[WEBUI] Hot deploy failed")
             ui.notify(f"Hot deploy failed: {e}", type="warning")
 
+    async def _on_run_market_simulation(self):
+        if self._market_running:
+            ui.notify("Market simulation already running", type="warning")
+            return
+
+        code = self._best_code_text
+        if not code:
+            code = PricingChallenge.baseline_code()
+            ui.notify("Using baseline pricing agent (no evolved code yet)", type="warning")
+
+        self._market_running = True
+        if self._market_status:
+            self._market_status.text = "Running simulation..."
+
+        try:
+            challenge = PricingChallenge()
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, challenge.simulate_agent_code, code, False)
+
+            self._market_times = [f"{tick.time_of_day:.1f}" for tick in result.ticks]
+            self._market_prices = [float(tick.agent_price) for tick in result.ticks]
+            self._market_demand = [float(tick.demand) for tick in result.ticks]
+            self._update_market_chart()
+
+            if self._market_status:
+                self._market_status.text = (
+                    f"Fitness {result.fitness:.1f} | Profit {result.total_profit:.1f} "
+                    f"| Overload {result.overload_minutes}m"
+                )
+        except Exception as e:
+            logger.exception("[WEBUI] Market simulation failed")
+            ui.notify(f"Simulation failed: {e}", type="negative")
+            if self._market_status:
+                self._market_status.text = "Simulation failed"
+        finally:
+            self._market_running = False
+
     # ------------------------------------------------------------------
     # UI helpers
     # ------------------------------------------------------------------
@@ -293,6 +349,22 @@ class EvolutionTab:
             "series": [
                 {"name": "Max Fitness", "type": "line", "data": []},
                 {"name": "Avg Fitness", "type": "line", "data": []},
+            ],
+            "animation": False,
+        }
+
+    def _market_chart_options(self) -> Dict[str, Any]:
+        return {
+            "tooltip": {"trigger": "axis"},
+            "legend": {"data": ["Agent Price", "Market Demand"]},
+            "xAxis": {"type": "category", "data": []},
+            "yAxis": [
+                {"type": "value", "name": "Price"},
+                {"type": "value", "name": "Demand", "position": "right"},
+            ],
+            "series": [
+                {"name": "Agent Price", "type": "line", "data": [], "yAxisIndex": 0},
+                {"name": "Market Demand", "type": "line", "data": [], "yAxisIndex": 1},
             ],
             "animation": False,
         }
@@ -351,6 +423,17 @@ class EvolutionTab:
         except Exception:
             pass
 
+    def _update_market_chart(self):
+        if not self._market_chart:
+            return
+        try:
+            self._market_chart.options["xAxis"]["data"] = self._market_times
+            self._market_chart.options["series"][0]["data"] = self._market_prices
+            self._market_chart.options["series"][1]["data"] = self._market_demand
+            self._market_chart.update()
+        except Exception:
+            pass
+
     def _update_best_code(self):
         if not self._best_code:
             return
@@ -371,4 +454,3 @@ class EvolutionTab:
 
 
 __all__ = ["EvolutionTab"]
-

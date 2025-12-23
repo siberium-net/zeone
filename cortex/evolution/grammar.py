@@ -28,7 +28,7 @@ class ActionTerminal:
     """Leaf node that performs an action on api."""
 
     name: str
-    amount: Optional[float] = None
+    amount: Optional[Any] = None
 
 
 @dataclass
@@ -56,6 +56,31 @@ class ConstNode:
     """Constant numeric value."""
 
     value: float
+
+
+@dataclass
+class MathNode:
+    """Math operations: Add/Sub/Mul/Div (safe division)."""
+
+    operator: str
+    left: Any
+    right: Any
+
+
+@dataclass
+class FuncNode:
+    """Math function node: Log/Exp/Sin/Min/Max."""
+
+    name: str
+    args: List[Any] = field(default_factory=list)
+
+
+@dataclass
+class HistoryNode:
+    """Read historical sensor value from memory."""
+
+    sensor: Any
+    steps_back: int = 1
 
 
 @dataclass

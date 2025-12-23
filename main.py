@@ -2015,6 +2015,17 @@ Examples:
                     stop_vpn_client=stop_vpn_client,
                     title=f"P2P Node - {crypto.node_id[:16]}...",
                 )
+
+                try:
+                    from agents.torrent.client import TorrentManager
+                    from webui.streaming import set_torrent_manager, register_streaming_routes
+
+                    torrent_manager = TorrentManager(loop=loop)
+                    torrent_manager.start()
+                    set_torrent_manager(torrent_manager)
+                    register_streaming_routes()
+                except Exception as e:
+                    logger.warning(f"[WEBUI] Streaming setup failed: {e}")
                 
                 logger.info(f"[WEBUI] Starting on http://0.0.0.0:{args.webui_port}")
                 logger.info("[WEBUI] Interactive shell disabled when WebUI is active")

@@ -12,12 +12,15 @@ from cortex.evolution.grammar import (
     ComparisonNode,
     ConditionNode,
     ConstNode,
+    FuncNode,
     Gene,
     GrammarContext,
     GRAMMAR_CONTEXT,
+    HistoryNode,
     IfNode,
     IndicatorNode,
     LogicNode,
+    MathNode,
     SensorTerminal,
 )
 
@@ -31,6 +34,10 @@ def random_action(context: Optional[GrammarContext] = None) -> Any:
     if name in ("buy", "sell"):
         amount = round(random.uniform(0.1, 10.0), 2)
         return ActionNode(action=name, amount=amount)
+
+    if name in {"set_price", "adjust_price", "adjust_price_up", "adjust_price_down"}:
+        amount_expr = random_value(2, ctx)
+        return ActionTerminal(name=name, amount=amount_expr)
 
     return ActionTerminal(name=name)
 
@@ -48,11 +55,31 @@ def random_value(depth: int, context: Optional[GrammarContext]) -> Any:
             return random_sensor(context)
         return ConstNode(value=round(random.uniform(0.0, 100.0), 3))
 
+    if random.random() < 0.2:
+        ctx = context or GRAMMAR_CONTEXT
+        sensor = random.choice(ctx.allowed_sensors) if ctx.allowed_sensors else "get_balance"
+        steps_back = random.randint(1, 6)
+        return HistoryNode(sensor=sensor, steps_back=steps_back)
+
     # Occasionally emit indicator node.
     if random.random() < 0.3:
         ind_name = random.choice(["rsi", "sma"])
         period = random.choice([7, 14, 21, 50])
         return IndicatorNode(name=ind_name, period=period, source=random_sensor(context))
+
+    if random.random() < 0.4:
+        op = random.choice(["Add", "Sub", "Mul", "Div"])
+        left = random_value(depth - 1, context)
+        right = random_value(depth - 1, context)
+        return MathNode(operator=op, left=left, right=right)
+
+    if random.random() < 0.3:
+        fn = random.choice(["Log", "Exp", "Sin", "Min", "Max"])
+        if fn in {"Min", "Max"}:
+            args = [random_value(depth - 1, context), random_value(depth - 1, context)]
+        else:
+            args = [random_value(depth - 1, context)]
+        return FuncNode(name=fn, args=args)
 
     return random_sensor(context)
 
@@ -114,6 +141,9 @@ def compile_genome(gene_root: Gene) -> str:
     """
 
     def compile_expr(node: Any) -> str:
+        if isinstance(node, (int, float)):
+            return repr(float(node))
+
         if isinstance(node, ConstNode):
             return repr(float(node.value))
 
@@ -122,6 +152,16 @@ def compile_genome(gene_root: Gene) -> str:
             if n.startswith("get_"):
                 return f"api.{n}()"
             return f"api.get_{n}()"
+
+        if isinstance(node, HistoryNode):
+            sensor_name = node.sensor
+            if isinstance(sensor_name, SensorTerminal):
+                sensor_name = sensor_name.name
+            sensor_key = str(sensor_name).strip()
+            if sensor_key.startswith("get_"):
+                sensor_key = sensor_key[4:]
+            steps = int(node.steps_back) if node.steps_back else 1
+            return f"api.get_history_value('{sensor_key}', {steps})"
 
         if isinstance(node, IndicatorNode):
             n = node.name.strip()
@@ -135,6 +175,33 @@ def compile_genome(gene_root: Gene) -> str:
             if node.period:
                 args.append(str(int(node.period)))
             return f"api.{fn}({', '.join(args)})" if args else f"api.{fn}()"
+
+        if isinstance(node, MathNode):
+            op = node.operator
+            left = compile_expr(node.left)
+            right = compile_expr(node.right)
+            if op == "Add":
+                return f"({left} + {right})"
+            if op == "Sub":
+                return f"({left} - {right})"
+            if op == "Mul":
+                return f"({left} * {right})"
+            return f"safe_div({left}, {right})"
+
+        if isinstance(node, FuncNode):
+            name = node.name
+            args = [compile_expr(a) for a in node.args]
+            if name == "Log":
+                return f"safe_log({args[0] if args else 1.0})"
+            if name == "Exp":
+                return f"math.exp({args[0] if args else 0.0})"
+            if name == "Sin":
+                return f"math.sin({args[0] if args else 0.0})"
+            if name == "Min":
+                return f"min({', '.join(args[:2])})"
+            if name == "Max":
+                return f"max({', '.join(args[:2])})"
+            return "0.0"
 
         if isinstance(node, ComparisonNode):
             return f"({compile_expr(node.left)} {node.comparator} {compile_expr(node.right)})"
@@ -156,7 +223,7 @@ def compile_genome(gene_root: Gene) -> str:
         if isinstance(node, ActionTerminal):
             name = node.name.strip()
             if node.amount is not None:
-                lines.append(f"{pad}api.{name}({float(node.amount)})")
+                lines.append(f"{pad}api.{name}({compile_expr(node.amount)})")
             else:
                 lines.append(f"{pad}api.{name}()")
             lines.append(f"{pad}agent_output['actions'].append('{name}')")
@@ -203,6 +270,14 @@ def compile_genome(gene_root: Gene) -> str:
 
     body_lines = compile_node(gene_root, indent=0)
     code_lines = [
+        "def safe_div(a, b):",
+        "    if b == 0:",
+        "        return 0.0",
+        "    return a / b",
+        "def safe_log(x):",
+        "    if x <= 0:",
+        "        return 0.0",
+        "    return math.log(x)",
         "history = []",
         "agent_output = {'actions': []}",
         "balance = api.get_balance()",
@@ -243,6 +318,16 @@ def _collect_nodes(node: Any) -> List[Any]:
         nodes.append(node)
         if node.source:
             nodes.extend(_collect_nodes(node.source))
+    elif isinstance(node, MathNode):
+        nodes.append(node)
+        nodes.extend(_collect_nodes(node.left))
+        nodes.extend(_collect_nodes(node.right))
+    elif isinstance(node, FuncNode):
+        nodes.append(node)
+        for a in node.args:
+            nodes.extend(_collect_nodes(a))
+    elif isinstance(node, HistoryNode):
+        nodes.append(node)
     elif isinstance(node, (SensorTerminal, ActionTerminal, ConstNode, ActionNode, ConditionNode)):
         nodes.append(node)
     return nodes
@@ -315,6 +400,8 @@ def mutate(gene: Gene, rate: float = 0.1) -> Gene:
         if isinstance(node, (ActionTerminal, ActionNode)):
             if random.random() < rate:
                 return random_action()
+            if isinstance(node, ActionTerminal) and node.amount is not None:
+                node.amount = mutate_node(node.amount)
         elif isinstance(node, SensorTerminal):
             if random.random() < rate:
                 return random_sensor()
@@ -326,6 +413,18 @@ def mutate(gene: Gene, rate: float = 0.1) -> Gene:
                 return random_value(1, None)
             if node.source:
                 node.source = mutate_node(node.source)
+        elif isinstance(node, MathNode):
+            if random.random() < rate:
+                return random_value(2, None)
+            node.left = mutate_node(node.left)
+            node.right = mutate_node(node.right)
+        elif isinstance(node, FuncNode):
+            if random.random() < rate:
+                return random_value(2, None)
+            node.args = [mutate_node(a) for a in node.args]
+        elif isinstance(node, HistoryNode):
+            if random.random() < rate:
+                return HistoryNode(sensor="market_price", steps_back=random.randint(1, 6))
         elif isinstance(node, ComparisonNode):
             if random.random() < rate:
                 return random_comparison(1, None)

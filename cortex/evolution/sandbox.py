@@ -1,3 +1,4 @@
+import math
 import multiprocessing
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
@@ -26,10 +27,15 @@ def _run_code(code: str, api: ZeoneAPI, result_conn: Any) -> None:
         "range": range,
         "min": min,
         "max": max,
+        "abs": abs,
+        "float": float,
+        "int": int,
+        "round": round,
     }
     sandbox_globals = {
         "__builtins__": safe_builtins,
         "api": api,
+        "math": math,
     }
     local_env: Dict[str, Any] = {}
     try:
